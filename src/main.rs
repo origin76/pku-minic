@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     let text_form_ir = std::str::from_utf8(&gen.writer()).unwrap().to_string();
     
     let mut file = File::create(output)?;
-    // program.generate(&mut file);
+    program.generate(&mut file);
     writeln!(file,"{}", text_form_ir)?;
     Ok(())
 }

@@ -1,9 +1,6 @@
 use crate::ast::*;
-use koopa::back::KoopaGenerator;
-use koopa::ir::dfg::DataFlowGraph;
-use koopa::ir::values::Binary;
 use koopa::ir::{builder_traits::*, *};
-use koopa::ir::{BinaryOp, FunctionData, Program, Type, TypeKind};
+use koopa::ir::{BinaryOp, FunctionData, Program, Type};
 use std::fs::File;
 use std::io::Write;
 
@@ -29,13 +26,13 @@ impl GenerateProgram for FuncDef {
         );
         let func = program.new_func(func_data);
         let main_data = program.func_mut(func);
-        let mut bb = main_data
+        let bb = main_data
             .dfg_mut()
             .new_bb()
             .basic_block(Some("%entry".to_string()));
-        main_data.layout_mut().bbs_mut().push_key_back(bb);
+        let _ = main_data.layout_mut().bbs_mut().push_key_back(bb);
 
-        match (&self.block.stmt) {
+        match &self.block.stmt {
             Stmt::Return(exp) => {
                 let result = self.generate_exp(exp, main_data);
                 let ret = main_data.dfg_mut().new_value().ret(Some(result));
@@ -64,14 +61,14 @@ impl FuncDef {
                         let zero = func.dfg_mut().new_value().integer(0);
                         let value = func.dfg_mut().new_value().binary(BinaryOp::Sub, zero, operand_value);
                         let bb = func.layout().entry_bb().unwrap();
-                        func.layout_mut().bb_mut(bb).insts_mut().push_key_back(value); 
+                        let _ = func.layout_mut().bb_mut(bb).insts_mut().push_key_back(value); 
                         value
                     }
                     UnaryOp::Not => {
                         let zero = func.dfg_mut().new_value().integer(0);
                         let value = func.dfg_mut().new_value().binary(BinaryOp::Eq, operand_value, zero);
                         let bb = func.layout().entry_bb().unwrap();
-                        func.layout_mut().bb_mut(bb).insts_mut().push_key_back(value); 
+                        let _ = func.layout_mut().bb_mut(bb).insts_mut().push_key_back(value); 
                         value
                     }
                 }
@@ -97,9 +94,9 @@ pub trait GenerateAsm {
 impl GenerateAsm for Program {
     fn generate(&self, f: &mut File) -> Result<(), ()> {
         for &func in self.func_layout() {
-            writeln!(f, ".text");
-            writeln!(f, ".globl {}", &self.func(func).name()[1..]);
-            writeln!(f, "{}:", &self.func(func).name()[1..]);
+            let _ = writeln!(f, ".text");
+            let _ = writeln!(f, ".globl {}", &self.func(func).name()[1..]);
+            let _ = writeln!(f, "{}:", &self.func(func).name()[1..]);
             self.func(func).generate(f)?;
         }
         Ok(())
@@ -108,18 +105,47 @@ impl GenerateAsm for Program {
 
 impl GenerateAsm for FunctionData {
     fn generate(&self, f: &mut File) -> Result<(), ()> {
-        for (&bb, node) in self.layout().bbs() {
+        for (&_bb, node) in self.layout().bbs() {
             for &inst in node.insts().keys() {
                 match self.dfg().value(inst).kind() {
                     ValueKind::Return(ret) => match self.dfg().value(ret.value().unwrap()).kind() {
                         ValueKind::Integer(num) => {
-                            writeln!(f, "li a0,{}", num.value());
-                            writeln!(f, "ret");
+                            let _ = writeln!(f, "li a0,{}", num.value());
+                            let _ = writeln!(f, "ret");
                         }
-                        _ => (),
+                        _ => {
+                            let _ = writeln!(f, "ret");
+                        }
                     },
                     ValueKind::Binary(bin) => {
-                        bin.
+                        match bin.op() {
+                            BinaryOp::Add => {
+                                if let ValueKind::Integer(left) = self.dfg().value(bin.lhs()).kind() {
+                                    if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
+                                        let _ = writeln!(f, "li a0,{}", left.value());
+                                        let _ = writeln!(f, "li a1,{}", right.value());
+                                        let _ = writeln!(f, "add a0, a0, a1");
+                                    }
+                                }
+                            }
+                            BinaryOp::Sub => {
+                                if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
+                                    let _ = writeln!(f, "li a1, {}", right.value());
+                                    let _ = writeln!(f, "li a0, 0");
+                                    let _ = writeln!(f, "sub a0, a0, a1");
+                                }
+                            }
+                            BinaryOp::Eq => {
+                                if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
+                                    if right.value() == 0 {
+                                        let _ = writeln!(f, "li a0, 0");
+                                    } else {
+                                        let _ = writeln!(f, "li a0, 1");
+                                    }
+                                }
+                            }
+                            _ => (),
+                        }
                     }
                     _ => (),
                 }
