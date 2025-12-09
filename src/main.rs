@@ -1,4 +1,4 @@
-use gen::{GenerateAsm, GenerateProgram};
+use gen::{GenerateProgram};
 use koopa::ir::*;
 use lalrpop_util::lalrpop_mod;
 use std::env::args;
@@ -8,8 +8,11 @@ use std::io::{self, Write};
 use koopa::ir::{*, builder_traits::*};
 use koopa::back::KoopaGenerator;
 
+use crate::asm::AsmBuilder;
+
 mod ast;
 mod gen;
+mod asm;
 
 lalrpop_mod!(sysy);
 
@@ -34,7 +37,12 @@ fn main() -> Result<()> {
     let text_form_ir = std::str::from_utf8(&gen.writer()).unwrap().to_string();
     
     let mut file = File::create(output)?;
-    program.generate(&mut file);
     writeln!(file,"{}", text_form_ir)?;
+
+    let mut asm = File::create("asm.a").unwrap();
+
+    let mut builder = AsmBuilder::new();
+    builder.generate_program(&program);
+    let _ = asm.write(builder.output.as_bytes());
     Ok(())
 }

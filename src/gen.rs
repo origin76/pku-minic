@@ -59,16 +59,30 @@ impl FuncDef {
                     UnaryOp::Plus => operand_value,
                     UnaryOp::Minus => {
                         let zero = func.dfg_mut().new_value().integer(0);
-                        let value = func.dfg_mut().new_value().binary(BinaryOp::Sub, zero, operand_value);
+                        let value =
+                            func.dfg_mut()
+                                .new_value()
+                                .binary(BinaryOp::Sub, zero, operand_value);
                         let bb = func.layout().entry_bb().unwrap();
-                        let _ = func.layout_mut().bb_mut(bb).insts_mut().push_key_back(value); 
+                        let _ = func
+                            .layout_mut()
+                            .bb_mut(bb)
+                            .insts_mut()
+                            .push_key_back(value);
                         value
                     }
                     UnaryOp::Not => {
                         let zero = func.dfg_mut().new_value().integer(0);
-                        let value = func.dfg_mut().new_value().binary(BinaryOp::Eq, operand_value, zero);
+                        let value =
+                            func.dfg_mut()
+                                .new_value()
+                                .binary(BinaryOp::Eq, operand_value, zero);
                         let bb = func.layout().entry_bb().unwrap();
-                        let _ = func.layout_mut().bb_mut(bb).insts_mut().push_key_back(value); 
+                        let _ = func
+                            .layout_mut()
+                            .bb_mut(bb)
+                            .insts_mut()
+                            .push_key_back(value);
                         value
                     }
                 }
@@ -79,11 +93,8 @@ impl FuncDef {
     fn generate_primary_exp(&self, primary_exp: &PrimaryExp, func: &mut FunctionData) -> Value {
         match primary_exp {
             PrimaryExp::Number(value) => func.dfg_mut().new_value().integer(*value),
-            PrimaryExp::Parentheses(exp) => {
-                self.generate_exp(exp, func)
-            }
+            PrimaryExp::Parentheses(exp) => self.generate_exp(exp, func),
         }
-
     }
 }
 
@@ -117,36 +128,36 @@ impl GenerateAsm for FunctionData {
                             let _ = writeln!(f, "ret");
                         }
                     },
-                    ValueKind::Binary(bin) => {
-                        match bin.op() {
-                            BinaryOp::Add => {
-                                if let ValueKind::Integer(left) = self.dfg().value(bin.lhs()).kind() {
-                                    if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
-                                        let _ = writeln!(f, "li a0,{}", left.value());
-                                        let _ = writeln!(f, "li a1,{}", right.value());
-                                        let _ = writeln!(f, "add a0, a0, a1");
-                                    }
+                    ValueKind::Binary(bin) => match bin.op() {
+                        BinaryOp::Add => {
+                            if let ValueKind::Integer(left) = self.dfg().value(bin.lhs()).kind() {
+                                if let ValueKind::Integer(right) =
+                                    self.dfg().value(bin.rhs()).kind()
+                                {
+                                    let _ = writeln!(f, "li a0,{}", left.value());
+                                    let _ = writeln!(f, "li a1,{}", right.value());
+                                    let _ = writeln!(f, "add a0, a0, a1");
                                 }
                             }
-                            BinaryOp::Sub => {
-                                if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
-                                    let _ = writeln!(f, "li a1, {}", right.value());
-                                    let _ = writeln!(f, "li a0, 0");
-                                    let _ = writeln!(f, "sub a0, a0, a1");
-                                }
-                            }
-                            BinaryOp::Eq => {
-                                if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
-                                    if right.value() == 0 {
-                                        let _ = writeln!(f, "li a0, 0");
-                                    } else {
-                                        let _ = writeln!(f, "li a0, 1");
-                                    }
-                                }
-                            }
-                            _ => (),
                         }
-                    }
+                        BinaryOp::Sub => {
+                            if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
+                                let _ = writeln!(f, "li a1, {}", right.value());
+                                let _ = writeln!(f, "li a0, 0");
+                                let _ = writeln!(f, "sub a0, a0, a1");
+                            }
+                        }
+                        BinaryOp::Eq => {
+                            if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
+                                if right.value() == 0 {
+                                    let _ = writeln!(f, "li a0, 0");
+                                } else {
+                                    let _ = writeln!(f, "li a0, 1");
+                                }
+                            }
+                        }
+                        _ => (),
+                    },
                     _ => (),
                 }
             }
