@@ -33,29 +33,87 @@ Stmt: Stmt = {
   "return" <exp: Exp> ";" => Stmt::Return(*exp),
 };
 
-pub Exp: Box<Exp> = AddExp;
+// =====================================
+// 层级 1: 逻辑或 (||) - 优先级最低
+// 对应 BNF: LOrExp ::= LAndExp | LOrExp "||" LAndExp;
+// =====================================
+pub Exp: Box<Exp> = LOrExp; // 入口指向 LOrExp
 
+LOrExp: Box<Exp> = {
+    <l:LOrExp> "||" <r:LAndExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Or, r)),
+    LAndExp, // 降级
+}
+
+// =====================================
+// 层级 2: 逻辑与 (&&)
+// 对应 BNF: LAndExp ::= EqExp | LAndExp "&&" EqExp;
+// =====================================
+LAndExp: Box<Exp> = {
+    <l:LAndExp> "&&" <r:EqExp> => Box::new(Exp::BinaryExp(l, BinaryOp::And, r)),
+    EqExp,
+}
+
+// =====================================
+// 层级 3: 相等性 (==, !=)
+// 对应 BNF: EqExp ::= RelExp | EqExp ("==" | "!=") RelExp;
+// =====================================
+EqExp: Box<Exp> = {
+    <l:EqExp> "==" <r:RelExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Eq, r)),
+    <l:EqExp> "!=" <r:RelExp> => Box::new(Exp::BinaryExp(l, BinaryOp::NotEq, r)),
+    RelExp,
+}
+
+// =====================================
+// 层级 4: 关系比较 (<, >, <=, >=)
+// 对应 BNF: RelExp ::= AddExp | RelExp ("<" | ">" | "<=" | ">=") AddExp;
+// =====================================
+RelExp: Box<Exp> = {
+    <l:RelExp> "<"  <r:AddExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Lt, r)),
+    <l:RelExp> ">"  <r:AddExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Gt, r)),
+    <l:RelExp> "<=" <r:AddExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Le, r)),
+    <l:RelExp> ">=" <r:AddExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Ge, r)),
+    AddExp,
+}
+
+// =====================================
+// 层级 5: 加减法 (+, -)
+// 对应 BNF: AddExp ::= MulExp | AddExp ("+" | "-") MulExp;
+// =====================================
 AddExp: Box<Exp> = {
     <l:AddExp> "+" <r:MulExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Add, r)),
     <l:AddExp> "-" <r:MulExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Sub, r)),
-    MulExp, // 递归出口：如果不是加减，就把它当做乘除表达式处理
+    MulExp,
 }
 
+// =====================================
+// 层级 6: 乘除模 (*, /, %)
+// 对应 BNF: MulExp ::= UnaryExp | MulExp ("*" | "/" | "%") UnaryExp;
+// =====================================
 MulExp: Box<Exp> = {
     <l:MulExp> "*" <r:UnaryExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Mul, r)),
     <l:MulExp> "/" <r:UnaryExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Div, r)),
     <l:MulExp> "%" <r:UnaryExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Mod, r)),
-    UnaryExp, // 递归出口
+    UnaryExp,
 }
 
-PrimaryExp: PrimaryExp = {
-  "(" <exp: Exp> ")" => PrimaryExp::Parentheses(<>),
-  <num: Number> => PrimaryExp::Number(<>),
-};
-
+// =====================================
+// 层级 7: 一元运算 (+, -, !)
+// 对应 BNF: UnaryExp ::= PrimaryExp | UnaryOp UnaryExp;
+// =====================================
 UnaryExp: Box<Exp> = {
+    // 递归调用 UnaryExp 以支持右结合 (如 - - 5)
     <op:UnaryOp> <e:UnaryExp> => Box::new(Exp::UnaryExp(op, e)),
-    <p:PrimaryExp> => Box::new(Exp::PrimaryExp(Box::new(p))),
+    // 降级到 PrimaryExp，需要包装成 Exp 类型
+    <p:PrimaryExp> => Box::new(Exp::PrimaryExp(p)),
+}
+
+// =====================================
+// 层级 8: 基础表达式 (数值, 括号) - 优先级最高
+// =====================================
+PrimaryExp: Box<PrimaryExp> = {
+    // 括号把优先级重置回最顶层 Exp (即 LOrExp)
+    "(" <e:Exp> ")" => Box::new(PrimaryExp::Parentheses(e)),
+    <n:Number> => Box::new(PrimaryExp::Number(n)),
 }
 
 UnaryOp: UnaryOp = {

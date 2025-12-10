@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use koopa::ir::{BasicBlock, BinaryOp, Function, FunctionData, Program, Value, ValueKind, dfg::DataFlowGraph, layout::BasicBlockNode, values::{Binary, Return}};
+use koopa::ir::{BasicBlock, BinaryOp, FunctionData, Program, Value, ValueKind, dfg::DataFlowGraph, layout::BasicBlockNode, values::{Binary, Return}};
 
 // 1. 定义寄存器分配/状态管理的上下文
 struct FuncContext {
@@ -250,6 +250,13 @@ impl AsmBuilder {
             BinaryOp::Ge => {
                 let _ = writeln!(self.output, "  slt   {}, {}, {}", dest_reg, lhs_reg, rhs_reg); // dest = (x < y)
                 let _ = writeln!(self.output, "  xori  {}, {}, 1", dest_reg, dest_reg);       // dest = !(x < y)
+            }
+
+            // NotEq (不等于): x != y
+            // 逻辑: xor 结果不为 0 表示不等，使用 sltu dest, x0, dest 设置非零为 1
+            BinaryOp::NotEq => {
+                let _ = writeln!(self.output, "  xor   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(self.output, "  sltu  {}, x0, {}", dest_reg, dest_reg);
             }
             
             _ => panic!("暂不支持的二元运算: {:?}", bin.op()),
