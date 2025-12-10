@@ -1,6 +1,11 @@
+use koopa::ir::{
+    dfg::DataFlowGraph,
+    layout::BasicBlockNode,
+    values::{Alloc, Binary, Branch, Load, Return, Store},
+    BasicBlock, BinaryOp, FunctionData, Program, Value, ValueKind,
+};
 use std::collections::HashMap;
 use std::fmt::Write;
-use koopa::ir::{BasicBlock, BinaryOp, FunctionData, Program, Value, ValueKind, dfg::DataFlowGraph, layout::BasicBlockNode, values::{Binary, Return}};
 
 // 1. 定义寄存器分配/状态管理的上下文
 struct FuncContext {
@@ -28,6 +33,14 @@ impl FuncContext {
                 "t2".into(),
                 "t1".into(),
                 "t0".into(),
+                "s1".into(),
+                "s2".into(),
+                "s3".into(),
+                "s4".into(),
+                "s5".into(),
+                "s6".into(),
+                "s7".into(),
+                "s8".into(),
             ],
             stack_size: 0,
         }
@@ -65,12 +78,11 @@ impl AsmBuilder {
             current_ctx: None,
         }
     }
-    
+
     // 获取当前上下文的辅助函数
     fn ctx(&mut self) -> &mut FuncContext {
         self.current_ctx.as_mut().expect("Context not initialized!")
     }
-
 
     pub fn generate_program(&mut self, program: &Program) {
         // 1. 先生成全局变量 (.data) 等
@@ -88,12 +100,11 @@ impl AsmBuilder {
 
     // 生成单个函数
     fn generate_function(&mut self, func: &FunctionData) {
-        
         // 1. 【重置上下文】进入新函数，清空寄存器分配状态
         self.current_ctx = Some(FuncContext::new());
 
         // 2. 打印函数标签 (去除 @ 前缀)
-        let name = &func.name()[1..]; 
+        let name = &func.name()[1..];
         use std::fmt::Write; // 允许 write! 宏写入 String
         let _ = writeln!(self.output, "\n  .text");
         let _ = writeln!(self.output, "  .globl {}", name);
@@ -107,14 +118,18 @@ impl AsmBuilder {
 
         // 5. 遍历基本块 (利用 Koopa 的 Layout)
         for (bb_handle, node) in func.layout().bbs() {
-            // node 是基本块节点，bb_handle 是基本块的 ID
+            // node 是基本块节点，bb_handle 是 basic_block的 ID
             // 我们把 dfg 传下去，因为处理指令时需要查表
             self.generate_bb(bb_handle, node, dfg);
         }
-        
+
         // 6. 结尾清理
+        if let Some(ctx) = &self.current_ctx {
+            if ctx.stack_size > 0 {
+                let _ = writeln!(self.output, "  addi  sp, sp, {}", ctx.stack_size);
+            }
+        }
         self.current_ctx = None;
-    
     }
 
     fn generate_bb(&mut self, bb: &BasicBlock, node: &BasicBlockNode, dfg: &DataFlowGraph) {
@@ -122,11 +137,11 @@ impl AsmBuilder {
         // 生成基本块标签，例如 .L0:
         // 如果是入口块，有些汇编器不需要标签，但加上也无妨
         // 你可以用 HashMap 映射 bb handle 到标签名，或者直接用名字
-        let bb_name = bb_data.name().clone().unwrap_or("unknown_bb".into());
+        let bb_name = &bb_data.name().clone().unwrap_or("unknown_bb".into())[1..];
         let _ = writeln!(self.output, "{}:", bb_name);
 
         // 遍历指令
-        for (val , _inst_node) in node.insts(){
+        for (val, _inst_node) in node.insts() {
             // 关键：把 inst_handle (ID) 和 dfg (数据表) 一起传下去
             self.generate_inst(*val, dfg);
         }
@@ -135,7 +150,7 @@ impl AsmBuilder {
     fn generate_inst(&mut self, inst: Value, dfg: &DataFlowGraph) {
         // 使用 dfg.value(inst) 来获取指令的具体数据
         let value_data = dfg.value(inst);
-        
+
         match value_data.kind() {
             ValueKind::Binary(bin) => {
                 // 此时我们需要 helper 函数也接受 dfg，因为操作数 bin.lhs() 也是 handle
@@ -144,14 +159,25 @@ impl AsmBuilder {
             ValueKind::Return(ret) => {
                 self.process_return(ret, dfg);
             }
-            // ... 其他指令
+            ValueKind::Alloc(alloc) => {
+                self.process_alloc(inst, alloc, dfg);
+            }
+            ValueKind::Load(load) => {
+                self.process_load(inst, load, dfg);
+            }
+            ValueKind::Store(store) => {
+                self.process_store(store, dfg);
+            }
+            ValueKind::Branch(br) => {
+                self.process_branch(br,dfg);
+            }
             _ => {}
         }
     }
 
     fn resolve_operand(&mut self, val: Value, dfg: &DataFlowGraph) -> String {
         let value_data = dfg.value(val);
-        
+
         match value_data.kind() {
             // 情况 1: 这是一个立即数 (Integer)
             ValueKind::Integer(int) => {
@@ -170,7 +196,9 @@ impl AsmBuilder {
             // 情况 2: 这是一个变量 (之前指令的计算结果)
             _ => {
                 // 直接查表，找不到就 panic (说明生成逻辑有顺序错误)
-                self.ctx().val_map.get(&val)
+                self.ctx()
+                    .val_map
+                    .get(&val)
                     .expect("使用变量前未定义 (寄存器未分配)")
                     .clone()
             }
@@ -192,48 +220,88 @@ impl AsmBuilder {
         match bin.op() {
             // === 算术运算 ===
             BinaryOp::Add => {
-                let _ = writeln!(self.output, "  add   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  add   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
             }
             BinaryOp::Sub => {
-                let _ = writeln!(self.output, "  sub   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  sub   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
             }
             BinaryOp::Mul => {
-                let _ = writeln!(self.output, "  mul   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  mul   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
             }
             BinaryOp::Div => {
-                let _ = writeln!(self.output, "  div   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  div   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
             }
-            
+
             // === 位运算 ===
             BinaryOp::And => {
-                let _ = writeln!(self.output, "  and   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  and   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
             }
             BinaryOp::Or => {
-                let _ = writeln!(self.output, "  or    {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  or    {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
             }
             BinaryOp::Xor => {
-                let _ = writeln!(self.output, "  xor   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  xor   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
             }
 
             // === 比较运算 (生成 0 或 1) ===
-            
-            // Eq (等于): x == y 
+
+            // Eq (等于): x == y
             // 逻辑: xor 结果为 0 表示相等，seqz (Set if Equal Zero) 将 0 变 1
             BinaryOp::Eq => {
-                let _ = writeln!(self.output, "  xor   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  xor   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
                 let _ = writeln!(self.output, "  seqz  {}, {}", dest_reg, dest_reg);
             }
 
             // Lt (小于): x < y
             // 直接使用 slt (Set Less Than)
             BinaryOp::Lt => {
-                let _ = writeln!(self.output, "  slt   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  slt   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
             }
 
             // Gt (大于): x > y
             // 逻辑: 相当于 y < x，交换操作数位置使用 slt
             BinaryOp::Gt => {
-                let _ = writeln!(self.output, "  slt   {}, {}, {}", dest_reg, rhs_reg, lhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  slt   {}, {}, {}",
+                    dest_reg, rhs_reg, lhs_reg
+                );
             }
 
             // Le (小于等于): x <= y
@@ -241,24 +309,46 @@ impl AsmBuilder {
             // 实现: slt dest, rhs, lhs (判断 y < x?) -> xori dest, dest, 1 (取反)
             // 或者使用伪指令: sgt dest, lhs, rhs (也就是 slt rhs, lhs) -> seqz/xori
             BinaryOp::Le => {
-                let _ = writeln!(self.output, "  slt   {}, {}, {}", dest_reg, rhs_reg, lhs_reg); // dest = (x > y)
-                let _ = writeln!(self.output, "  xori  {}, {}, 1", dest_reg, dest_reg);       // dest = !(x > y)
+                let _ = writeln!(
+                    self.output,
+                    "  slt   {}, {}, {}",
+                    dest_reg, rhs_reg, lhs_reg
+                ); // dest = (x > y)
+                let _ = writeln!(self.output, "  xori  {}, {}, 1", dest_reg, dest_reg);
+                // dest = !(x > y)
             }
 
             // Ge (大于等于): x >= y
             // 逻辑: x >= y 等价于 !(x < y)
             BinaryOp::Ge => {
-                let _ = writeln!(self.output, "  slt   {}, {}, {}", dest_reg, lhs_reg, rhs_reg); // dest = (x < y)
-                let _ = writeln!(self.output, "  xori  {}, {}, 1", dest_reg, dest_reg);       // dest = !(x < y)
+                let _ = writeln!(
+                    self.output,
+                    "  slt   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                ); // dest = (x < y)
+                let _ = writeln!(self.output, "  xori  {}, {}, 1", dest_reg, dest_reg);
+                // dest = !(x < y)
             }
 
             // NotEq (不等于): x != y
             // 逻辑: xor 结果不为 0 表示不等，使用 sltu dest, x0, dest 设置非零为 1
             BinaryOp::NotEq => {
-                let _ = writeln!(self.output, "  xor   {}, {}, {}", dest_reg, lhs_reg, rhs_reg);
+                let _ = writeln!(
+                    self.output,
+                    "  xor   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
                 let _ = writeln!(self.output, "  sltu  {}, x0, {}", dest_reg, dest_reg);
             }
-            
+
+            BinaryOp::Mod => {
+                let _ = writeln!(
+                    self.output,
+                    "  rem   {}, {}, {}",
+                    dest_reg, lhs_reg, rhs_reg
+                );
+            }
+
             _ => panic!("暂不支持的二元运算: {:?}", bin.op()),
         }
 
@@ -271,30 +361,51 @@ impl AsmBuilder {
         self.try_free_temp_reg(rhs_reg);
     }
 
-    fn process_return(&mut self, ret_val: &Return , dfg: &DataFlowGraph) {
+    fn process_return(&mut self, ret_val: &Return, dfg: &DataFlowGraph) {
         if ret_val.value().is_some() {
             let val = ret_val.value().unwrap();
             let reg = self.resolve_operand(val, dfg);
             let _ = writeln!(self.output, "  mv    a0 , {}", reg);
-        } 
+        }
         let _ = writeln!(self.output, "  ret");
     }
-    
+
+    fn process_alloc(&mut self, result_val: Value, _alloc: &Alloc, _dfg: &DataFlowGraph) {
+        let reg = self.ctx().alloc_reg(result_val);
+        let _ = writeln!(self.output, "  addi  sp, sp, -4");
+        let _ = writeln!(self.output, "  addi  {}, sp, 0", reg);
+        self.ctx().stack_size += 4;
+    }
+
+    fn process_load(&mut self, result_val: Value, load: &Load, dfg: &DataFlowGraph) {
+        let ptr_reg = self.resolve_operand(load.src(), dfg);
+        let dest_reg = self.ctx().alloc_reg(result_val);
+        let _ = writeln!(self.output, "  lw    {}, 0({})", dest_reg, ptr_reg);
+    }
+
+    fn process_store(&mut self, store: &Store, dfg: &DataFlowGraph) {
+        let ptr_reg = self.resolve_operand(store.dest(), dfg);
+        let val_reg = self.resolve_operand(store.value(), dfg);
+        let _ = writeln!(self.output, "  sw    {}, 0({})", val_reg, ptr_reg);
+    }
+
+    fn process_branch(&mut self, br: &Branch, dfg: &DataFlowGraph) {
+        let cond_reg = self.resolve_operand(br.cond(), dfg);
+        let true_bb_data = dfg.bbs().get(&br.true_bb()).unwrap();
+        let true_name = &true_bb_data.name().as_ref().unwrap()[1..];
+        let false_bb_data = dfg.bbs().get(&br.false_bb()).unwrap();
+        let false_name = &false_bb_data.name().as_ref().unwrap()[1..];
+        let _ = writeln!(self.output, "  bnez  {}, {}", cond_reg, true_name);
+        let _ = writeln!(self.output, "  j     {}", false_name);
+    }
+
     // 简单的回收逻辑 (可选)
     fn try_free_temp_reg(&mut self, reg: String) {
-        // 如果这个寄存器是 x0，不用回收
-        if reg == "x0" { return; }
-        
-        // 如果这个寄存器没有被记录在 val_map 里，说明它是给立即数临时用的，赶紧回收
-        // 注意：这需要 val_map 能反向查询，或者你确信它是临时的。
-        // 一个简单粗暴的方法是：检查它是否在当前函数的 value_map values 里
-        // 但由于性能原因，通常简单的编译器实现会跳过这一步，直接等寄存器耗尽报错，或者把立即数也当做 Value 存起来。
-        
-        // 这里为了演示你的需求 "t0 -> t1 -> t2"，如果不回收，很快就会用到 t3, t4...
-        // 如果要完全复现你题目中的 tight allocation，建议把立即数也作为 Value 存在 map 里，
-        // 或者简单地将分配过的临时寄存器 push back 到 free_regs。
-        
-        // 既然你只是做简单的分配，可以暂时先不实现复杂的回收，
-        // 只要你的寄存器池够大 (t0-t6, a0-a7, s0-s11)，跑通简单程序没问题。
+        if reg == "x0" {
+            return;
+        }
+        if !self.ctx().val_map.values().any(|v| v == &reg) {
+            self.ctx().free_regs.push(reg);
+        }
     }
 }

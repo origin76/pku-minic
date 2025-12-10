@@ -7,6 +7,7 @@ pub struct FunctionGenerator<'a> {
     pub func: &'a mut FunctionData,
     // 【关键】追踪当前正在写入的基本块
     current_bb: Option<BasicBlock>,
+    name_counter : usize
 }
 
 impl<'a> FunctionGenerator<'a> {
@@ -14,6 +15,7 @@ impl<'a> FunctionGenerator<'a> {
         Self {
             func,
             current_bb: None,
+            name_counter:1,
         }
     }
 
@@ -22,6 +24,18 @@ impl<'a> FunctionGenerator<'a> {
         self.current_bb.unwrap_or_else(|| {
             self.func.layout().entry_bb().expect("Entry block should exist")
         })
+    }
+
+    fn new_bb(&mut self, prefix: &str) -> BasicBlock {
+        // 格式化名字：例如 "%then_1", "%end_2"
+        // 注意：Koopa IR 的名字通常以 % 开头
+        let name = format!("%{}_{}", prefix, self.name_counter);
+        
+        // 计数器自增，保证下一个名字不重复
+        self.name_counter += 1;
+
+        // 在 DFG 中创建基本块
+        self.func.dfg_mut().new_bb().basic_block(Some(name))
     }
 
     // 【核心工具】统一插入指令，自动找对位置
@@ -134,8 +148,8 @@ impl<'a> FunctionGenerator<'a> {
         self.add_inst(lhs_ne_zero);
 
         // 3. 创建基本块: true_bb (计算 RHS), end_bb (结束)
-        let true_bb = self.func.dfg_mut().new_bb().basic_block(None);
-        let end_bb = self.func.dfg_mut().new_bb().basic_block(None);
+        let true_bb = self.new_bb("true");
+        let end_bb = self.new_bb("end");
 
         // 4. 生成分支指令: if (lhs) goto true_bb; else goto end_bb;
         let br = self.func.dfg_mut().new_value().branch(lhs_ne_zero, true_bb, end_bb);
@@ -190,8 +204,8 @@ impl<'a> FunctionGenerator<'a> {
         self.add_inst(lhs_ne_zero);
 
         // 3. 基本块: false_bb (LHS为假，需要算RHS), end_bb
-        let false_bb = self.func.dfg_mut().new_bb().basic_block(None);
-        let end_bb = self.func.dfg_mut().new_bb().basic_block(None);
+        let false_bb = self.new_bb("false");
+        let end_bb = self.new_bb("end");
 
         // 4. 分支: if (lhs) goto end_bb; else goto false_bb;
         // 注意这里: lhs为真直接跳 end (短路)
