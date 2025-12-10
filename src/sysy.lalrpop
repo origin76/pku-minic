@@ -1,5 +1,6 @@
 use crate::ast::*;
 use std::boxed::Box;
+use koopa::ir::BinaryOp;
 
 
 // lalrpop 里的约定
@@ -29,22 +30,33 @@ FuncType: FuncType = "int" => FuncType::Int;
 Block: Block = "{" <stmt: Stmt> "}" => Block { <> };
 
 Stmt: Stmt = {
-  "return" <exp: Exp> ";" => Stmt::Return(<>),
+  "return" <exp: Exp> ";" => Stmt::Return(*exp),
 };
 
-Exp: Exp = {
-  <unary_exp: UnaryExp> => Exp::UnaryExp(<>),
-};
+pub Exp: Box<Exp> = AddExp;
+
+AddExp: Box<Exp> = {
+    <l:AddExp> "+" <r:MulExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Add, r)),
+    <l:AddExp> "-" <r:MulExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Sub, r)),
+    MulExp, // 递归出口：如果不是加减，就把它当做乘除表达式处理
+}
+
+MulExp: Box<Exp> = {
+    <l:MulExp> "*" <r:UnaryExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Mul, r)),
+    <l:MulExp> "/" <r:UnaryExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Div, r)),
+    <l:MulExp> "%" <r:UnaryExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Mod, r)),
+    UnaryExp, // 递归出口
+}
 
 PrimaryExp: PrimaryExp = {
-  "(" <exp: Exp> ")" => PrimaryExp::Parentheses(Box::new(<>)),
+  "(" <exp: Exp> ")" => PrimaryExp::Parentheses(<>),
   <num: Number> => PrimaryExp::Number(<>),
 };
 
-UnaryExp: UnaryExp = {
-  <primary_exp: PrimaryExp> => UnaryExp::PrimaryExp(<>),
-  <unary_op: UnaryOp> <unary_exp: UnaryExp> => UnaryExp::UnaryOp(unary_op, Box::new(unary_exp)),
-};
+UnaryExp: Box<Exp> = {
+    <op:UnaryOp> <e:UnaryExp> => Box::new(Exp::UnaryExp(op, e)),
+    <p:PrimaryExp> => Box::new(Exp::PrimaryExp(Box::new(p))),
+}
 
 UnaryOp: UnaryOp = {
   "+" => UnaryOp::Plus,

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use koopa::ir::{BasicBlock, Function, FunctionData, Program, Value, ValueKind, dfg::DataFlowGraph, entities::BasicBlockData, layout::BasicBlockNode, values::{Binary, Return}};
+use koopa::ir::{BasicBlock, BinaryOp, Function, FunctionData, Program, Value, ValueKind, dfg::DataFlowGraph, layout::BasicBlockNode, values::{Binary, Return}};
 
 // 1. 定义寄存器分配/状态管理的上下文
 struct FuncContext {
@@ -189,8 +189,6 @@ impl AsmBuilder {
         // alloc_reg 会将 result_val 绑定到该寄存器，供后续指令使用
         let dest_reg = self.ctx().alloc_reg(result_val);
 
-        // 4. 根据操作符生成汇编
-        use koopa::ir::BinaryOp;
         match bin.op() {
             // === 算术运算 ===
             BinaryOp::Add => {

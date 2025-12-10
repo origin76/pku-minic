@@ -1,8 +1,6 @@
 use crate::ast::*;
 use koopa::ir::{builder_traits::*, *};
 use koopa::ir::{BinaryOp, FunctionData, Program, Type};
-use std::fs::File;
-use std::io::Write;
 
 pub trait GenerateProgram {
     type Out;
@@ -44,124 +42,108 @@ impl GenerateProgram for FuncDef {
 }
 
 impl FuncDef {
+
+    // 主入口
     fn generate_exp(&self, exp: &Exp, func: &mut FunctionData) -> Value {
         match exp {
-            Exp::UnaryExp(unary_exp) => self.generate_unary_exp(unary_exp, func),
-        }
-    }
+            // === 情况 1: 二元运算 (递归生成左右子树) ===
+            Exp::BinaryExp(lhs_exp, op, rhs_exp) => {
+                self.generate_binary_exp(lhs_exp, op, rhs_exp, func)
+            }
 
-    fn generate_unary_exp(&self, unary_exp: &UnaryExp, func: &mut FunctionData) -> Value {
-        match unary_exp {
-            UnaryExp::PrimaryExp(primary_exp) => self.generate_primary_exp(primary_exp, func),
-            UnaryExp::UnaryOp(op, operand) => {
-                let operand_value = self.generate_unary_exp(operand, func);
-                match op {
-                    UnaryOp::Plus => operand_value,
-                    UnaryOp::Minus => {
-                        let zero = func.dfg_mut().new_value().integer(0);
-                        let value =
-                            func.dfg_mut()
-                                .new_value()
-                                .binary(BinaryOp::Sub, zero, operand_value);
-                        let bb = func.layout().entry_bb().unwrap();
-                        let _ = func
-                            .layout_mut()
-                            .bb_mut(bb)
-                            .insts_mut()
-                            .push_key_back(value);
-                        value
-                    }
-                    UnaryOp::Not => {
-                        let zero = func.dfg_mut().new_value().integer(0);
-                        let value =
-                            func.dfg_mut()
-                                .new_value()
-                                .binary(BinaryOp::Eq, operand_value, zero);
-                        let bb = func.layout().entry_bb().unwrap();
-                        let _ = func
-                            .layout_mut()
-                            .bb_mut(bb)
-                            .insts_mut()
-                            .push_key_back(value);
-                        value
-                    }
-                }
+            // === 情况 2: 一元运算 (递归生成子树) ===
+            Exp::UnaryExp(op, child_exp) => {
+                self.generate_unary_exp(op, child_exp, func)
+            }
+
+            // === 情况 3: 基础表达式 (数值或括号) ===
+            // 这是递归的终点，或者是括号改变优先级的入口
+            Exp::PrimaryExp(primary) => {
+                self.generate_primary_exp(primary, func)
             }
         }
     }
 
-    fn generate_primary_exp(&self, primary_exp: &PrimaryExp, func: &mut FunctionData) -> Value {
-        match primary_exp {
-            PrimaryExp::Number(value) => func.dfg_mut().new_value().integer(*value),
+    // 处理二元表达式
+    fn generate_binary_exp(&self, lhs: &Exp, op: &BinaryOp, rhs: &Exp, func: &mut FunctionData) -> Value {
+        // 1. 递归计算左右操作数
+        let lhs_val = self.generate_exp(lhs, func);
+        let rhs_val = self.generate_exp(rhs, func);
+
+        // 3. 构建指令并插入当前基本块
+        let value = func.dfg_mut().new_value().binary(*op, lhs_val, rhs_val);
+        // 注意：后续实现控制流(if/while)时，需动态获取当前 bb，不要硬编码 entry_bb
+        let bb = func.layout().entry_bb().unwrap();
+        func.layout_mut().bb_mut(bb).insts_mut().push_key_back(value);
+
+        value
+    }
+
+    // 处理一元表达式
+    fn generate_unary_exp(&self, op: &UnaryOp, child: &Exp, func: &mut FunctionData) -> Value {
+        // 1. 递归计算子表达式
+        let val = self.generate_exp(child, func);
+
+        // 2. 根据操作符生成对应逻辑
+        match op {
+            UnaryOp::Plus => val, // +x 等于 x，直接返回
+            UnaryOp::Minus => {
+                // -x 等价于 0 - x
+                let zero = func.dfg_mut().new_value().integer(0);
+                let res = func.dfg_mut().new_value().binary(koopa::ir::BinaryOp::Sub, zero, val);
+                
+                let bb = func.layout().entry_bb().unwrap();
+                func.layout_mut().bb_mut(bb).insts_mut().push_key_back(res);
+                res
+            }
+            UnaryOp::Not => {
+                // !x 等价于 x == 0
+                let zero = func.dfg_mut().new_value().integer(0);
+                let res = func.dfg_mut().new_value().binary(koopa::ir::BinaryOp::Eq, val, zero);
+                
+                let bb = func.layout().entry_bb().unwrap();
+                func.layout_mut().bb_mut(bb).insts_mut().push_key_back(res);
+                res
+            }
+        }
+    }
+
+    // 处理基础表达式
+    fn generate_primary_exp(&self, primary: &PrimaryExp, func: &mut FunctionData) -> Value {
+        match primary {
+            // 递归终点：生成整数常量
+            PrimaryExp::Number(n) => func.dfg_mut().new_value().integer(*n),
+            
+            // 括号：(Exp) -> 重新调用 generate_exp
             PrimaryExp::Parentheses(exp) => self.generate_exp(exp, func),
         }
     }
-}
 
-pub trait GenerateAsm {
-    fn generate(&self, f: &mut File) -> Result<(), ()>;
-}
-
-impl GenerateAsm for Program {
-    fn generate(&self, f: &mut File) -> Result<(), ()> {
-        for &func in self.func_layout() {
-            let _ = writeln!(f, ".text");
-            let _ = writeln!(f, ".globl {}", &self.func(func).name()[1..]);
-            let _ = writeln!(f, "{}:", &self.func(func).name()[1..]);
-            self.func(func).generate(f)?;
-        }
-        Ok(())
+    // === 辅助函数：构建二元指令并插入当前基本块 ===
+    // 提取这个逻辑是为了避免代码重复，并且当你以后支持控制流(if/while)时，
+    // 只需要修改这里获取 `bb` 的逻辑即可 (不要硬编码 entry_bb)。
+    fn build_binary(
+        &self, 
+        op: BinaryOp, 
+        lhs: Value, 
+        rhs: Value, 
+        func: &mut FunctionData
+    ) -> Value {
+        // 1. 在 DFG 中创建指令数据
+        let value = func.dfg_mut().new_value().binary(op, lhs, rhs);
+        
+        // 2. 获取当前应当插入的基本块
+        // 注意：目前你硬编码了 entry_bb，这对于顺序执行没问题。
+        // 等实现 if/while 时，你需要一个变量来追踪 "current_bb"
+        let bb = func.layout().entry_bb().unwrap();
+        
+        // 3. 将指令加入基本块
+        func.layout_mut()
+            .bb_mut(bb)
+            .insts_mut()
+            .push_key_back(value);
+            
+        value
     }
-}
-
-impl GenerateAsm for FunctionData {
-    fn generate(&self, f: &mut File) -> Result<(), ()> {
-        for (&_bb, node) in self.layout().bbs() {
-            for &inst in node.insts().keys() {
-                match self.dfg().value(inst).kind() {
-                    ValueKind::Return(ret) => match self.dfg().value(ret.value().unwrap()).kind() {
-                        ValueKind::Integer(num) => {
-                            let _ = writeln!(f, "li a0,{}", num.value());
-                            let _ = writeln!(f, "ret");
-                        }
-                        _ => {
-                            let _ = writeln!(f, "ret");
-                        }
-                    },
-                    ValueKind::Binary(bin) => match bin.op() {
-                        BinaryOp::Add => {
-                            if let ValueKind::Integer(left) = self.dfg().value(bin.lhs()).kind() {
-                                if let ValueKind::Integer(right) =
-                                    self.dfg().value(bin.rhs()).kind()
-                                {
-                                    let _ = writeln!(f, "li a0,{}", left.value());
-                                    let _ = writeln!(f, "li a1,{}", right.value());
-                                    let _ = writeln!(f, "add a0, a0, a1");
-                                }
-                            }
-                        }
-                        BinaryOp::Sub => {
-                            if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
-                                let _ = writeln!(f, "li a1, {}", right.value());
-                                let _ = writeln!(f, "li a0, 0");
-                                let _ = writeln!(f, "sub a0, a0, a1");
-                            }
-                        }
-                        BinaryOp::Eq => {
-                            if let ValueKind::Integer(right) = self.dfg().value(bin.rhs()).kind() {
-                                if right.value() == 0 {
-                                    let _ = writeln!(f, "li a0, 0");
-                                } else {
-                                    let _ = writeln!(f, "li a0, 1");
-                                }
-                            }
-                        }
-                        _ => (),
-                    },
-                    _ => (),
-                }
-            }
-        }
-        Ok(())
-    }
+    
 }

@@ -4,8 +4,7 @@ use lalrpop_util::lalrpop_mod;
 use std::env::args;
 use std::fs::{read_to_string, File};
 use std::io::Result;
-use std::io::{self, Write};
-use koopa::ir::{*, builder_traits::*};
+use std::io::{Write};
 use koopa::back::KoopaGenerator;
 
 use crate::asm::AsmBuilder;
@@ -20,7 +19,7 @@ fn main() -> Result<()> {
     // 解析命令行参数
     let mut args = args();
     args.next();
-    let mode = args.next().unwrap();
+    let _mode = args.next().unwrap();
     let input = args.next().unwrap();
     args.next();
     let output = args.next().unwrap();

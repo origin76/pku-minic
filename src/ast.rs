@@ -1,3 +1,5 @@
+use koopa::ir::BinaryOp;
+
 #[derive(Debug)]
 pub struct CompUnit {
     pub func_def: FuncDef,
@@ -25,63 +27,25 @@ pub enum Stmt {
     Return(Exp),
 }
 
-#[derive(Debug)]
+// ast.rs
+#[derive(Debug,Clone)]
 pub enum Exp {
-    UnaryExp(UnaryExp),
+    // 二元运算
+    BinaryExp(Box<Exp>, BinaryOp, Box<Exp>),
+    // 一元运算 (直接在 Exp 层递归)
+    UnaryExp(UnaryOp, Box<Exp>),
+    // 【必须】基础表达式 (用于通过 Number 终止递归)
+    PrimaryExp(Box<PrimaryExp>), 
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum PrimaryExp {
     Parentheses(Box<Exp>),
     Number(i32),
 }
-
-#[derive(Debug)]
-pub enum UnaryExp {
-    PrimaryExp(PrimaryExp),
-    UnaryOp(UnaryOp, Box<UnaryExp>),
-}
-
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum UnaryOp {
     Plus,
     Minus,
     Not,
-}
-
-pub trait Evaluate {
-    fn evaluate(&self) -> i32;
-}
-
-impl Evaluate for Exp {
-    fn evaluate(&self) -> i32 {
-        match self {
-            Exp::UnaryExp(unary_exp) => unary_exp.evaluate(),
-        }
-    }
-}
-
-impl Evaluate for UnaryExp {
-    fn evaluate(&self) -> i32 {
-        match self {
-            UnaryExp::PrimaryExp(primary_exp) => primary_exp.evaluate(),
-            UnaryExp::UnaryOp(op, operand) => {
-                let operand_value = operand.evaluate();
-                match op {
-                    UnaryOp::Plus => operand_value,
-                    UnaryOp::Minus => -operand_value,
-                    UnaryOp::Not => !operand_value,
-                }
-            }
-        }
-    }
-}
-
-impl Evaluate for PrimaryExp {
-    fn evaluate(&self) -> i32 {
-        match self {
-            PrimaryExp::Number(value) => *value,
-            PrimaryExp::Parentheses(exp) => exp.evaluate(),
-        }
-    }
 }

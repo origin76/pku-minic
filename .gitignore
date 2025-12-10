@@ -1,4 +1,4 @@
 /target
 *.koopa
 *.a
-hello.c
+input.c
