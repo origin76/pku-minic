@@ -41,7 +41,7 @@ impl<'a> FunctionGenerator<'a> {
     // 【核心工具】统一插入指令，自动找对位置
     pub fn add_inst(&mut self, inst: Value) {
         let bb = self.get_cur_bb();
-        self.func.layout_mut().bb_mut(bb).insts_mut().push_key_back(inst);
+        let _ = self.func.layout_mut().bb_mut(bb).insts_mut().push_key_back(inst);
     }
     
     // 切换当前基本块 (用于 br/jump 之后)
@@ -133,7 +133,7 @@ impl<'a> FunctionGenerator<'a> {
         //    C 语言逻辑: result 初始化为 0 (False)
         let entry_bb = self.func.layout().entry_bb().unwrap();
         let result_ptr = self.func.dfg_mut().new_value().alloc(Type::get_i32());
-        self.func.layout_mut().bb_mut(entry_bb).insts_mut().push_key_front(result_ptr); // alloc 最好放在入口块最前面
+        let _ = self.func.layout_mut().bb_mut(entry_bb).insts_mut().push_key_front(result_ptr); // alloc 最好放在入口块最前面
         
         // 初始化 result = 0
         let zero = self.func.dfg_mut().new_value().integer(0);
@@ -156,7 +156,7 @@ impl<'a> FunctionGenerator<'a> {
         self.add_inst(br);
 
         // === 开始生成 true_bb ===
-        self.func.layout_mut().bbs_mut().push_key_back(true_bb);
+        let _ = self.func.layout_mut().bbs_mut().push_key_back(true_bb);
         self.set_cur_bb(true_bb);
         
         // 5. 计算 RHS
@@ -175,7 +175,7 @@ impl<'a> FunctionGenerator<'a> {
         self.add_inst(jump_end);
 
         // === 开始生成 end_bb ===
-        self.func.layout_mut().bbs_mut().push_key_back(end_bb);
+        let _ = self.func.layout_mut().bbs_mut().push_key_back(end_bb);
         self.set_cur_bb(end_bb);
 
         // 7. 读取最终结果
@@ -190,7 +190,7 @@ impl<'a> FunctionGenerator<'a> {
         //    如果 LHS 为真，短路跳到 end，结果保持 1
         let entry_bb = self.func.layout().entry_bb().unwrap();
         let result_ptr = self.func.dfg_mut().new_value().alloc(Type::get_i32());
-        self.func.layout_mut().bb_mut(entry_bb).insts_mut().push_key_front(result_ptr);
+        let _ = self.func.layout_mut().bb_mut(entry_bb).insts_mut().push_key_front(result_ptr);
 
         let one = self.func.dfg_mut().new_value().integer(1);
         let zero = self.func.dfg_mut().new_value().integer(0);
@@ -213,7 +213,7 @@ impl<'a> FunctionGenerator<'a> {
         self.add_inst(br);
 
         // === false_bb ===
-        self.func.layout_mut().bbs_mut().push_key_back(false_bb);
+        let _ =  self.func.layout_mut().bbs_mut().push_key_back(false_bb);
         self.set_cur_bb(false_bb);
         
         // 5. 计算 RHS
@@ -230,7 +230,7 @@ impl<'a> FunctionGenerator<'a> {
         self.add_inst(jump_end);
 
         // === end_bb ===
-        self.func.layout_mut().bbs_mut().push_key_back(end_bb);
+        let _ = self.func.layout_mut().bbs_mut().push_key_back(end_bb);
         self.set_cur_bb(end_bb);
 
         let load_res = self.func.dfg_mut().new_value().load(result_ptr);

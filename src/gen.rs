@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::genfunc::FunctionGenerator;
-use koopa::ir::{builder_traits::*, *};
-use koopa::ir::{BinaryOp, FunctionData, Program, Type};
+use koopa::ir::{builder_traits::*};
+use koopa::ir::{FunctionData, Program, Type};
 
 pub trait GenerateProgram {
     type Out;
@@ -28,7 +28,7 @@ impl GenerateProgram for FuncDef {
 
         // 2. 创建 Entry Block
         let entry_bb = main_data.dfg_mut().new_bb().basic_block(Some("%entry".to_string()));
-        main_data.layout_mut().bbs_mut().push_key_back(entry_bb);
+        let _ = main_data.layout_mut().bbs_mut().push_key_back(entry_bb);
 
         // 3. 【核心修改】实例化生成器，并设置初始状态
         let mut gen = FunctionGenerator::new(main_data);
