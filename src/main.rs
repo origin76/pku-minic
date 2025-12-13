@@ -14,6 +14,7 @@ mod gen;
 mod genfunc;
 mod asm;
 mod scope;
+mod constval;
 
 lalrpop_mod!(sysy);
 

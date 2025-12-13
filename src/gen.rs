@@ -29,7 +29,7 @@ impl GenerateProgram for FuncDef {
             .basic_block(Some("%entry".to_string()));
         let _ = main_data.layout_mut().bbs_mut().push_key_back(entry_bb);
 
-        // 3. 【核心修改】实例化生成器，并设置初始状态
+        // 3. 实例化生成器，并设置初始状态
         let mut gen = FunctionGenerator::new(main_data);
         // 初始化 current_bb 为 entry
         gen.set_cur_bb(entry_bb);
@@ -52,7 +52,7 @@ impl GenerateProgram for FuncDef {
                     }
                 }
                 BlockItem::Decl(decl) => {
-                    ()
+                    gen.generate_decl(decl);
                 }
             }
         }

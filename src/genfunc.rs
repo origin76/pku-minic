@@ -13,7 +13,7 @@ pub struct FunctionGenerator<'a> {
     pub func: &'a mut FunctionData,
     // 【关键】追踪当前正在写入的基本块
     current_bb: Option<BasicBlock>,
-    symbol_table: SymbolTable,
+    pub symbol_table: SymbolTable,
     name_counter: usize,
 }
 
@@ -144,11 +144,18 @@ impl<'a> FunctionGenerator<'a> {
             PrimaryExp::Parentheses(exp) => self.generate_exp(exp),
 
             PrimaryExp::LVal(lval) => {
-                let sym = self.symbol_table.lookup(&lval.ident).unwrap_or(&Symbol::Const(0));
-                match sym {
-                    Symbol::Const(i) => self.func.dfg_mut().new_value().integer(*i)
+                // 1. 查表
+                match self.symbol_table.lookup(&lval.ident) {
+                    Some(Symbol::Const(val)) => {
+                        // 2. 如果是常量，直接把整数值转换成 Koopa 的 Integer Value
+                        self.func.dfg_mut().new_value().integer(*val)
+                    }
+                    None => {
+                        panic!("Undefined variable: {}", lval.ident);
+                    }
+                    // Some(Symbol::Var(_)) => { ... } // 未来处理变量
                 }
-            }  
+            }
         }
     }
 
