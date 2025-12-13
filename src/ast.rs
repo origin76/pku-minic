@@ -7,24 +7,56 @@ pub struct CompUnit {
 
 #[derive(Debug)]
 pub struct FuncDef {
-    pub func_type: FuncType,
+    pub func_type: Type,
     pub ident: String,
     pub block: Block,
 }
 
-#[derive(Debug)]
-pub enum FuncType {
+#[derive(Debug,Clone)]
+pub enum Type {
     Int,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Block {
-    pub stmt: Stmt,
+    pub items: Vec<BlockItem>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub enum BlockItem {
+    Decl(Decl), // 声明 (const int a = 1;)
+    Stmt(Stmt), // 语句 (return 0;)
+}
+
+#[derive(Debug, Clone)]
+pub enum Decl {
+    ConstDecl(ConstDecl),
+    // VarDecl(VarDecl), // 未来支持变量声明 int a = 1;
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstDecl {
+    pub b_type: Type,
+    pub defs: Vec<ConstDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstDef {
+    pub ident: String,
+    // 文法中 ConstInitVal ::= ConstExp，而 ConstExp 就是 Exp
+    // 所以这里直接存 Exp 即可
+    pub init: Box<Exp>, 
+}
+
+// === 语句 (Stmt) ===
+
+#[derive(Debug, Clone)]
 pub enum Stmt {
-    Return(Exp),
+    Return(Box<Exp>),
+    // Assign(LVal, Box<Exp>), // 未来支持赋值
+    // If(...), While(...)
+    // Block(Block), // 嵌套代码块
+    // Exp(Option<Box<Exp>>), // 表达式语句
 }
 
 // ast.rs
@@ -42,7 +74,15 @@ pub enum Exp {
 pub enum PrimaryExp {
     Parentheses(Box<Exp>),
     Number(i32),
+    LVal(LVal),
 }
+
+#[derive(Debug, Clone)]
+pub struct LVal {
+    pub ident: String,
+    // pub indices: Vec<Exp>, // 未来支持数组 a[1][2]
+}
+
 #[derive(Debug,Clone)]
 pub enum UnaryOp {
     Plus,

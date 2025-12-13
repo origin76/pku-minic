@@ -6,6 +6,14 @@ use koopa::ir::BinaryOp;
 // lalrpop 里的约定
 grammar;
 
+Comma<T>: Vec<T> = {
+    <h:T> <t:("," <T>)*> => {
+        let mut v = vec![h];
+        v.extend(t);
+        v
+    }
+};
+
 // 约束 lexer 的行为
 match {
     // 跳过空白符和单行注释
@@ -20,17 +28,47 @@ match {
 pub CompUnit: CompUnit = <func_def: FuncDef> => CompUnit { <> };
 
 FuncDef: FuncDef = {
-  <func_type: FuncType> <ident: Ident> "(" ")" <block: Block> => {
+  <func_type: Type> <ident: Ident> "(" ")" <block: Block> => {
     FuncDef { <> }
   }
 }
 
-FuncType: FuncType = "int" => FuncType::Int;
+Type: Type = "int" => Type::Int;
 
-Block: Block = "{" <stmt: Stmt> "}" => Block { <> };
+Block: Block = "{" <items:BlockItem*> "}" => Block { items };
+
+BlockItem: BlockItem = {
+    <d:Decl> => BlockItem::Decl(d),
+    <s:Stmt> => BlockItem::Stmt(s),
+}
+
+Decl: Decl = {
+    <c:ConstDecl> => Decl::ConstDecl(c),
+}
+
+ConstDecl: ConstDecl = {
+    "const" <t:Type> <defs:Comma<ConstDef>> ";" => ConstDecl {
+        b_type: t,
+        defs: defs,
+    }
+}
+
+// ConstDef ::= IDENT "=" ConstInitVal;
+ConstDef: ConstDef = {
+    <id:Ident> "=" <v:ConstInitVal> => ConstDef {
+        ident: id,
+        init: v,
+    }
+}
+
+// ConstInitVal ::= ConstExp;
+ConstInitVal: Box<Exp> = ConstExp;
+
+// ConstExp ::= Exp;
+ConstExp: Box<Exp> = Exp;
 
 Stmt: Stmt = {
-  "return" <exp: Exp> ";" => Stmt::Return(*exp),
+  "return" <exp: Exp> ";" => Stmt::Return(exp),
 };
 
 // =====================================
@@ -111,10 +149,16 @@ UnaryExp: Box<Exp> = {
 // 层级 8: 基础表达式 (数值, 括号) - 优先级最高
 // =====================================
 PrimaryExp: Box<PrimaryExp> = {
-    // 括号把优先级重置回最顶层 Exp (即 LOrExp)
     "(" <e:Exp> ")" => Box::new(PrimaryExp::Parentheses(e)),
-    <n:Number> => Box::new(PrimaryExp::Number(n)),
+    <l:LVal> => Box::new(PrimaryExp::LVal(l)),    // 新增: 匹配左值
+    <n:Number> => Box::new(PrimaryExp::Number(n)), // 匹配数字
 }
+
+// LVal ::= IDENT;
+LVal: LVal = {
+    <id:Ident> => LVal { ident: id }
+}
+
 
 UnaryOp: UnaryOp = {
   "+" => UnaryOp::Plus,

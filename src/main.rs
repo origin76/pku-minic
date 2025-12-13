@@ -13,6 +13,7 @@ mod ast;
 mod gen;
 mod genfunc;
 mod asm;
+mod scope;
 
 lalrpop_mod!(sysy);
 
