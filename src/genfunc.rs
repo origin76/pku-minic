@@ -150,10 +150,14 @@ impl<'a> FunctionGenerator<'a> {
                         // 2. 如果是常量，直接把整数值转换成 Koopa 的 Integer Value
                         self.func.dfg_mut().new_value().integer(*val)
                     }
+                    Some(Symbol::Var(ptr)) => {
+                        let load = self.func.dfg_mut().new_value().load(*ptr);
+                        self.add_inst(load);
+                        load
+                    }
                     None => {
                         panic!("Undefined variable: {}", lval.ident);
                     }
-                    // Some(Symbol::Var(_)) => { ... } // 未来处理变量
                 }
             }
         }

@@ -49,6 +49,9 @@ impl GenerateProgram for FuncDef {
                             // 使用 gen 插入指令 (它知道该插在 entry 还是某个 end_bb)
                             gen.add_inst(ret);
                         }
+                        Stmt::Assign(lval, exp ) => {
+                            gen.generate_assign(lval, exp);
+                        }
                     }
                 }
                 BlockItem::Decl(decl) => {

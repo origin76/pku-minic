@@ -6,8 +6,8 @@ pub enum Symbol {
     // 对于 const int a = 10; 我们直接记录它的整数值
     Const(i32),
     
-    // 未来预留：对于 int a = 10; 我们记录它在 Koopa IR 中的内存地址 (Alloc 指令的返回值)
-    // Var(Value), 
+    // 对于 int a = 10; 我们记录它在 Koopa IR 中的内存地址 (Alloc 指令的返回值)
+    Var(Value), 
 }
 
 pub struct SymbolTable {
@@ -38,6 +38,12 @@ impl SymbolTable {
         // 获取当前作用域 (栈顶)
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, Symbol::Const(val));
+        }
+    }
+
+    pub fn insert_var(&mut self, name: String, ptr: Value) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name, Symbol::Var(ptr));
         }
     }
 

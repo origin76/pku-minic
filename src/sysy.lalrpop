@@ -44,6 +44,25 @@ BlockItem: BlockItem = {
 
 Decl: Decl = {
     <c:ConstDecl> => Decl::ConstDecl(c),
+    <v:VarDecl> => Decl::VarDecl(v),
+}
+
+// 变量声明规则
+// VarDecl ::= BType VarDef {"," VarDef} ";";
+VarDecl: VarDecl = {
+    <t:Type> <defs:Comma<VarDef>> ";" => VarDecl {
+        b_type: t,
+        defs: defs,
+    }
+}
+
+// 变量定义规则
+// VarDef ::= IDENT | IDENT "=" InitVal;
+VarDef: VarDef = {
+    <id:Ident> <init:("=" <Exp>)?> => VarDef {
+        ident: id,
+        init: init, // init 是 Option<Box<Exp>>
+    }
 }
 
 ConstDecl: ConstDecl = {
@@ -69,6 +88,7 @@ ConstExp: Box<Exp> = Exp;
 
 Stmt: Stmt = {
   "return" <exp: Exp> ";" => Stmt::Return(exp),
+   <l:LVal> "=" <e:Exp> ";" => Stmt::Assign(l, e),
 };
 
 // =====================================

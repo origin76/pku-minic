@@ -31,7 +31,21 @@ pub enum BlockItem {
 #[derive(Debug, Clone)]
 pub enum Decl {
     ConstDecl(ConstDecl),
-    // VarDecl(VarDecl), // 未来支持变量声明 int a = 1;
+    VarDecl(VarDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct VarDecl {
+    pub b_type: Type,
+    pub defs: Vec<VarDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VarDef {
+    pub ident: String,
+    // 变量初始化是可选的 (int a;)
+    // 并且初始化值是在运行时计算的 (int a = b + 1;)，所以是 Exp
+    pub init: Option<Box<Exp>>, 
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +67,7 @@ pub struct ConstDef {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Return(Box<Exp>),
-    // Assign(LVal, Box<Exp>), // 未来支持赋值
+    Assign(LVal, Box<Exp>),
     // If(...), While(...)
     // Block(Block), // 嵌套代码块
     // Exp(Option<Box<Exp>>), // 表达式语句
