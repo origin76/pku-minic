@@ -5,7 +5,7 @@ pub struct CompUnit {
     pub func_def: FuncDef,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct FuncDef {
     pub func_type: Type,
     pub ident: String,

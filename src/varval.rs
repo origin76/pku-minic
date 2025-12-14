@@ -13,7 +13,7 @@ impl<'a> FunctionGenerator<'a> {
         
         // 3. 将 alloc 指令插入到 Entry Block 的【最前面】
         // 这样可以确保它在任何使用之前都有效
-        self.func.layout_mut().bb_mut(entry_bb).insts_mut().push_key_front(alloc);
+        let _ = self.func.layout_mut().bb_mut(entry_bb).insts_mut().push_key_front(alloc);
         
         alloc
     }
