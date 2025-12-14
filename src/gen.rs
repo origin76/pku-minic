@@ -38,21 +38,7 @@ impl GenerateProgram for FuncDef {
         for i in &self.block.items {
             match i {
                 BlockItem::Stmt(exp) => {
-                    match exp {
-                        Stmt::Return(ret_exp) => {
-                            // 调用 gen.generate_exp，而不是 self.generate_exp
-                            let result = gen.generate_exp(&ret_exp);
-
-                            // 生成 ret 指令
-                            let ret = gen.func.dfg_mut().new_value().ret(Some(result));
-
-                            // 使用 gen 插入指令 (它知道该插在 entry 还是某个 end_bb)
-                            gen.add_inst(ret);
-                        }
-                        Stmt::Assign(lval, exp ) => {
-                            gen.generate_assign(lval, exp);
-                        }
-                    }
+                   gen.generate_stmt(exp);
                 }
                 BlockItem::Decl(decl) => {
                     gen.generate_decl(decl);

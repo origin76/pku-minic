@@ -66,11 +66,10 @@ pub struct ConstDef {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Return(Box<Exp>),
+    Return(Option<Box<Exp>>),
     Assign(LVal, Box<Exp>),
-    // If(...), While(...)
-    // Block(Block), // 嵌套代码块
-    // Exp(Option<Box<Exp>>), // 表达式语句
+    Exp(Option<Box<Exp>>),
+    Block(Block),
 }
 
 // ast.rs

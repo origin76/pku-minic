@@ -4,7 +4,7 @@ use koopa::ir::{
 };
 
 use crate::{
-    ast::{Exp, LVal, PrimaryExp, UnaryOp},
+    ast::{Block, BlockItem, Exp, LVal, PrimaryExp, Stmt, UnaryOp},
     scope::{Symbol, SymbolTable},
 };
 
@@ -314,5 +314,63 @@ impl<'a> FunctionGenerator<'a> {
         self.add_inst(load_res);
 
         load_res
+    }
+
+    pub fn generate_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            // === 赋值 ===
+            Stmt::Assign(lval, exp) => {
+                self.generate_assign(lval, exp);
+            }
+
+            // === [修改] Return ===
+            Stmt::Return(exp_opt) => {
+                let ret_val = if let Some(exp) = exp_opt {
+                    // 有返回值: return 0;
+                    Some(self.generate_exp(exp))
+                } else {
+                    // 无返回值: return; (对应 void)
+                    None
+                };
+
+                // 生成 ret 指令
+                let ret_inst = self.func.dfg_mut().new_value().ret(ret_val);
+                self.add_inst(ret_inst);
+            }
+
+            // === [新增] 代码块 ===
+            Stmt::Block(block) => {
+                // 直接递归调用 generate_block
+                // generate_block 内部会处理 symbol_table.enter_scope() / exit_scope()
+                self.generate_block(block);
+            }
+
+            // === [新增] 表达式语句 ===
+            Stmt::Exp(exp_opt) => {
+                if let Some(exp) = exp_opt {
+                    // 计算表达式
+                    // 生成的指令会自动插入到 basic block 中
+                    // 虽然有了 result Value，但我们不需要用它，直接丢弃即可
+                    self.generate_exp(exp);
+                }
+                // 如果是 None (即空语句 ";")，什么都不做
+            }
+        }
+    }
+
+    fn generate_block(&mut self, block: &Block) {
+        // 1. 【关键】进入新作用域
+        // 这保证了 { int a; } 里的 a 不会污染外部，也不会跟外部的 a 冲突
+        self.symbol_table.enter_scope();
+
+        for item in &block.items {
+            match item {
+                BlockItem::Decl(decl) => self.generate_decl(decl),
+                BlockItem::Stmt(stmt) => self.generate_stmt(stmt), // 这里递归调用 generate_stmt
+            }
+        }
+
+        // 2. 【关键】退出作用域
+        self.symbol_table.exit_scope();
     }
 }

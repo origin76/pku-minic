@@ -87,8 +87,10 @@ ConstInitVal: Box<Exp> = ConstExp;
 ConstExp: Box<Exp> = Exp;
 
 Stmt: Stmt = {
-  "return" <exp: Exp> ";" => Stmt::Return(exp),
+  "return" <e:Exp?> ";" => Stmt::Return(e),
    <l:LVal> "=" <e:Exp> ";" => Stmt::Assign(l, e),
+   <b:Block> => Stmt::Block(b),
+   <e:Exp?> ";" => Stmt::Exp(e),
 };
 
 // =====================================
