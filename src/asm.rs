@@ -138,6 +138,18 @@ impl FuncContext {
         self.locked_regs.clear();
     }
 
+    pub fn get_temp_reg_for_address_calc(&mut self, output: &mut String) -> &'static str {
+        // 1. 调用现有的逻辑找一个可用的坑位
+        // 如果所有寄存器都满了，find_free_reg_or_spill 会自动把最久没用的那个 Spill 到栈上
+        // 并清空该寄存器的状态 (value=None, dirty=false)
+        let reg_idx = self.find_free_reg_or_spill(output);
+
+        // 2. 直接返回名字
+        // 注意：我们【不】调用 update_reg_map，也不设置 reg_status.value
+        // 因为这个寄存器马上就会被用作临时用途，用完就可以被当作"空闲"的再次分配
+        self.phys_regs[reg_idx]
+    }
+
     // ==========================================
     // Internal Logic: Spilling & LRU
     // ==========================================
@@ -266,35 +278,78 @@ impl AsmBuilder {
 
     // 生成单个函数
     fn generate_function(&mut self, func: &FunctionData) {
-        // 1. 【重置上下文】进入新函数，清空寄存器分配状态
+        // 1. 【重置上下文】
         self.ctx = Some(FuncContext::new());
 
-        // 2. 打印函数标签 (去除 @ 前缀)
+        // 2. 打印函数标签到【最终输出】
         let name = &func.name()[1..];
-        use std::fmt::Write; // 允许 write! 宏写入 String
-        let _ = writeln!(self.output, "\n  .text");
-        let _ = writeln!(self.output, "  .globl {}", name);
-        let _ = writeln!(self.output, "{}:", name);
+        // 注意：这里还是写到 self.output，因为标签是在函数最前面的
+        writeln!(self.output, "\n  .text").unwrap();
+        writeln!(self.output, "  .globl {}", name).unwrap();
+        writeln!(self.output, "{}:", name).unwrap();
 
-        // 3. 序言 (Prologue): 保存 fp, ra, 移动 sp 等 (如果需要)
-        // ...
+        // === 【关键步骤 A】 准备临时缓冲区 ===
+        // 我们把 self.output 里的内容（主要是前面的全局代码）先移走，
+        // 或者创建一个新的 String 给函数体用。
+        // 为了不修改 generate_bb 等函数的签名，我们用 std::mem::take 偷梁换柱。
 
-        // 4. 获取 DFG (Data Flow Graph)，指令的具体信息都在这里
+        // 保存之前的 output (包含 .data 和 函数标签)
+        let mut final_output = std::mem::take(&mut self.output);
+
+        // 此时 self.output 变成了空字符串，用来暂存函数体汇编
+
+        // 3. 遍历基本块生成指令 (生成的代码会进入 self.output 暂存)
         let dfg = func.dfg();
-
-        // 5. 遍历基本块 (利用 Koopa 的 Layout)
         for (bb_handle, node) in func.layout().bbs() {
-            // node 是基本块节点，bb_handle 是 basic_block的 ID
-            // 我们把 dfg 传下去，因为处理指令时需要查表
             self.generate_bb(bb_handle, node, dfg);
         }
 
-        // 6. 结尾清理
-        if let Some(ctx) = &self.ctx {
-            if ctx.stack_size > 0 {
-                let _ = writeln!(self.output, "  addi  sp, sp, {}", ctx.stack_size);
+        // === 【关键步骤 B】 计算最终栈大小并对齐 ===
+        let ctx = self.ctx.as_ref().unwrap();
+        // RISC-V 要求栈指针 16 字节对齐
+        let raw_stack_size = ctx.stack_size;
+        let align_stack_size = (raw_stack_size + 15) & !15;
+
+        // === 【关键步骤 C】 组装最终代码 ===
+
+        // C1. 写入 Prologue (分配栈空间) 到 final_output
+        if align_stack_size > 0 {
+            // 支持大立即数处理
+            if align_stack_size < 2048 {
+                writeln!(final_output, "  addi  sp, sp, -{}", align_stack_size).unwrap();
+            } else {
+                writeln!(final_output, "  li    t0, -{}", align_stack_size).unwrap();
+                writeln!(final_output, "  add   sp, sp, t0").unwrap();
             }
         }
+
+        // C2. 处理 Epilogue (替换占位符)
+        // 从 self.output (暂存区) 拿出生成的函数体
+        let body_asm = std::mem::take(&mut self.output);
+
+        // 构造真正的 return 序列
+        let epilogue = if align_stack_size > 0 {
+            if align_stack_size < 2048 {
+                format!("  addi  sp, sp, {}\n  ret", align_stack_size)
+            } else {
+                format!(
+                    "  li    t0, {}\n  add   sp, sp, t0\n  ret",
+                    align_stack_size
+                )
+            }
+        } else {
+            "  ret".to_string()
+        };
+
+        // 将占位符替换为真正的 epilogue
+        // 假设我们在 process_ret 里写入了 "#RET_PLACEHOLDER#"
+        let final_body = body_asm.replace("#RET_PLACEHOLDER#", &epilogue);
+
+        // C3. 将处理好的函数体追加到 final_output
+        final_output.push_str(&final_body);
+
+        // === 【关键步骤 D】 还原 self.output ===
+        self.output = final_output;
         self.ctx = None;
     }
 
@@ -552,84 +607,132 @@ impl AsmBuilder {
         // 但为了保持代码简单，对于"简单寄存器分配"，你可以选择不回收(直到耗尽)，或者在这里做一个简单的检查回收。
     }
 
-    fn process_return(&mut self, ret_val: &Return, dfg: &DataFlowGraph) {
-        if ret_val.value().is_some() {
-            let val = ret_val.value().unwrap();
-            let reg = self.resolve_operand(val, dfg);
-            let _ = writeln!(self.output, "  mv    a0 , {}", reg);
-        }
-        let _ = writeln!(self.output, "  ret");
-    }
+    fn process_return(&mut self, ret: &Return, dfg: &DataFlowGraph) {
+        // 1. 如果有返回值，将其移动到 a0
+        if let Some(val) = ret.value() {
+            let value_data = dfg.value(val);
 
+            match value_data.kind() {
+                // === 情况 A: 返回值是立即数 (例如 return 0;) ===
+                // 直接写入 a0，不需要经过寄存器分配器，也不占用临时寄存器
+                ValueKind::Integer(int) => {
+                    let imm = int.value();
+                    // 直接生成 li a0, imm
+                    writeln!(self.output, "  li    a0, {}", imm).unwrap();
+                }
+
+                // === 情况 B: 返回值是变量 (例如 return %1;) ===
+                _ => {
+                    // 1. 让 Context 帮我们找到这个变量在哪里
+                    //    - 如果它在某个寄存器(如 t1)中，这里返回 "t1"
+                    //    - 如果它被 Spill 到了栈上，get_reg_for_operand 会自动生成 lw t? offset(sp)，然后返回那个 t?
+                    let reg = self
+                        .ctx
+                        .as_mut()
+                        .unwrap()
+                        .get_reg_for_operand(val, &mut self.output);
+
+                    // 2. 如果它不在 a0，就搬运到 a0
+                    //    (如果 get_reg_for_operand 刚好分配了 a0 给它，这步就省了)
+                    if reg != "a0" {
+                        writeln!(self.output, "  mv    a0, {}", reg).unwrap();
+                    }
+                }
+            }
+        }
+
+        // 2. 【关键】写入占位符
+        // 后续会在 generate_function 结束时被替换为真正的 Epilogue (恢复栈指针 + ret)
+        writeln!(self.output, "#RET_PLACEHOLDER#").unwrap();
+    }
+    
     fn process_alloc(&mut self, result_val: Value, _alloc: &Alloc, _dfg: &DataFlowGraph) {
-        // 1. 在 Context 中分配栈空间 (这只是增加计数器，不动 SP)
-        // 假设 alloc i32 需要 4 字节
-        // 注意：这里分配的是"变量本身的存储空间"
-        let offset = self
-            .ctx
+        // 1. 分配栈槽
+        // 假设 alloc i32 占 4 字节
+        let offset = self.ctx.as_mut().unwrap().stack_size;
+        self.ctx.as_mut().unwrap().stack_size += 4; // 仅仅增加计数器
+
+        // 2. 记录映射：这个 IR Value 对应栈上的这个偏移
+        // 【关键】不要调用 alloc_reg_for_result！不要给它分配寄存器！
+        self.ctx
             .as_mut()
             .unwrap()
-            .get_or_alloc_stack_slot(result_val);
+            .stack_slots
+            .insert(result_val, offset);
 
-        // 2. 分配结果寄存器 (用来存放这个变量的地址指针)
-        let dest_reg = self
-            .ctx
-            .as_mut()
-            .unwrap()
-            .alloc_reg_for_result(result_val, &mut self.output);
-
-        // 3. 计算地址: dest_reg = sp + offset
-        // 只有 offset 超出立即数范围时才需要特殊处理，通常直接 addi 即可
-        if offset >= -2048 && offset <= 2047 {
-            let _ = writeln!(self.output, "  addi  {}, sp, {}", dest_reg, offset);
-        } else {
-            // 如果 offset 太大，需要先 li 到临时寄存器再 add (这里简化处理)
-            let _ = writeln!(self.output, "  li    {}, {}", dest_reg, offset);
-            let _ = writeln!(self.output, "  add   {}, {}, sp", dest_reg, dest_reg);
-        }
+        // 3. 函数结束，什么汇编都不写
     }
-
     fn process_load(&mut self, result_val: Value, load: &Load, dfg: &DataFlowGraph) {
-        // 1. 获取源地址寄存器
-        let ptr_reg = self.resolve_operand(load.src(), dfg);
-        let ptr_reg_str = ptr_reg.to_string();
+        let src_ptr = load.src();
 
-        // 【关键】锁定源地址寄存器
-        self.ctx.as_mut().unwrap().lock_reg(&ptr_reg_str);
-
-        // 2. 分配目标寄存器 (此时 ptr_reg 不会被选为 victim)
+        // 1. 分配目标寄存器
         let dest_reg = self
             .ctx
             .as_mut()
             .unwrap()
             .alloc_reg_for_result(result_val, &mut self.output);
 
-        // 3. 生成 Load 指令
-        let _ = writeln!(self.output, "  lw    {}, 0({})", dest_reg, ptr_reg);
-
-        // 4. 解锁
-        self.ctx.as_mut().unwrap().unlock_all();
+        // 2. 检查源是否是栈槽
+        if let Some(offset) = self.ctx.as_mut().unwrap().stack_slots.get(&src_ptr) {
+            // === 情况 A: 从局部变量加载 ===
+            // 汇编: lw dest_reg, offset(sp)
+            if *offset >= -2048 && *offset <= 2047 {
+                writeln!(self.output, "  lw    {}, {}(sp)", dest_reg, offset).unwrap();
+            } else {
+                // 处理大偏移...
+            }
+        } else {
+            // === 情况 B: 从普通指针加载 ===
+            let ptr_reg = self.resolve_operand(src_ptr, dfg);
+            writeln!(self.output, "  lw    {}, 0({})", dest_reg, ptr_reg).unwrap();
+        }
     }
 
     fn process_store(&mut self, store: &Store, dfg: &DataFlowGraph) {
-        // 1. 获取地址寄存器
-        let ptr_reg = self.resolve_operand(store.dest(), dfg);
-        let ptr_reg_str = ptr_reg.to_string(); // 复制名字以避免借用冲突
+        let val = store.value();
+        let dest_ptr = store.dest();
 
-        // 【关键】锁定地址寄存器，防止在解析 value 时被 Spill 掉
-        self.ctx.as_mut().unwrap().lock_reg(&ptr_reg_str);
-
-        // 2. 获取值寄存器
-        let val_reg = self.resolve_operand(store.value(), dfg);
+        // 1. 准备要存的值
+        let val_reg = self.resolve_operand(val, dfg);
         let val_reg_str = val_reg.to_string();
-
-        // 锁定值寄存器 (虽然这之后马上就用了，但为了习惯一致性可以锁)
         self.ctx.as_mut().unwrap().lock_reg(&val_reg_str);
 
-        // 3. 生成指令
-        let _ = writeln!(self.output, "  sw    {}, 0({})", val_reg, ptr_reg);
+        // 2. 检查 dest_ptr 是 Alloc 出来的栈槽，还是普通指针？
+        let offset_opt = self
+            .ctx
+            .as_ref()
+            .unwrap()
+            .stack_slots
+            .get(&dest_ptr)
+            .copied();
 
-        // 4. 解锁所有
+        if let Some(offset) = offset_opt {
+            // === 情况 A: 存入局部变量 (Alloc) ===
+            // 直接使用 sp + offset 寻址
+            // 汇编: sw val_reg, offset(sp)
+
+            // 处理大立即数偏移 (超过 +/- 2047)
+            if offset >= -2048 && offset <= 2047 {
+                writeln!(self.output, "  sw    {}, {}(sp)", val_reg, offset).unwrap();
+            } else {
+                // 只有偏移量超级大时，才需要临时算地址
+                // 注意：这里用一个临时寄存器，用完即扔，不用分配
+                let tmp_reg = self
+                    .ctx
+                    .as_mut()
+                    .unwrap()
+                    .get_temp_reg_for_address_calc(&mut self.output);
+                writeln!(self.output, "  li    {}, {}", tmp_reg, offset).unwrap();
+                writeln!(self.output, "  add   {}, {}, sp", tmp_reg, tmp_reg).unwrap();
+                writeln!(self.output, "  sw    {}, 0({})", val_reg, tmp_reg).unwrap();
+            }
+        } else {
+            // === 情况 B: 存入普通指针 (比如数组指针参数，或者全局变量地址) ===
+            // 这个指针本身存在寄存器里
+            let ptr_reg = self.resolve_operand(dest_ptr, dfg);
+            writeln!(self.output, "  sw    {}, 0({})", val_reg, ptr_reg).unwrap();
+        }
+
         self.ctx.as_mut().unwrap().unlock_all();
     }
 
