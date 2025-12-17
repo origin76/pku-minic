@@ -1,8 +1,5 @@
 use koopa::ir::{
-    dfg::DataFlowGraph,
-    layout::BasicBlockNode,
-    values::{Alloc, Binary, Branch, Load, Return, Store},
-    BasicBlock, BinaryOp, FunctionData, Program, Value, ValueKind,
+    BasicBlock, BinaryOp, FunctionData, Program, Value, ValueKind, dfg::DataFlowGraph, layout::BasicBlockNode, values::{Alloc, Binary, Branch, Jump, Load, Return, Store}
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
@@ -392,6 +389,9 @@ impl AsmBuilder {
             ValueKind::Branch(br) => {
                 self.process_branch(br, dfg);
             }
+            ValueKind::Jump(j) => {
+                self.process_jump(j, dfg);
+            }
             _ => {}
         }
     }
@@ -411,7 +411,6 @@ impl AsmBuilder {
                     // 注意：立即数不对应任何 Value，所以不需要 update_reg_map
 
                     // 1. 找一个空闲寄存器 (可能会触发 Spill，写入 sw 指令到 self.output)
-                    // 假设 self.ctx 是 FuncContext，self.output 是 String
                     let reg_idx = self
                         .ctx
                         .as_mut()
@@ -427,6 +426,7 @@ impl AsmBuilder {
                     // 我们不需要将其 bind 到 val 上。
                     // 但是，为了防止处理下一个操作数时把它 spill 掉，最好锁住它
                     // (如果你在外部调用处统一 lock，这里可以不 lock，但建议返回后在外部 lock)
+                    self.ctx.as_mut().unwrap().lock_reg(reg_name);
 
                     reg_name.to_string()
                 }
@@ -434,7 +434,6 @@ impl AsmBuilder {
 
             // === 情况 2: 变量 (Value) ===
             _ => {
-                // 不能只用 get() 查表了！
                 // 变量可能在寄存器里，也可能在栈里。
                 // 如果在栈里，get_reg_for_operand 会自动生成 lw 指令并更新状态。
 
@@ -645,7 +644,7 @@ impl AsmBuilder {
         // 后续会在 generate_function 结束时被替换为真正的 Epilogue (恢复栈指针 + ret)
         writeln!(self.output, "#RET_PLACEHOLDER#").unwrap();
     }
-    
+
     fn process_alloc(&mut self, result_val: Value, _alloc: &Alloc, _dfg: &DataFlowGraph) {
         // 1. 分配栈槽
         // 假设 alloc i32 占 4 字节
@@ -744,5 +743,18 @@ impl AsmBuilder {
         let false_name = &false_bb_data.name().as_ref().unwrap()[1..];
         let _ = writeln!(self.output, "  bnez  {}, {}", cond_reg, true_name);
         let _ = writeln!(self.output, "  j     {}", false_name);
+    }
+    // 在 generate_inst 或 process_jump 中
+    fn process_jump(&mut self, jump: &Jump, dfg: &DataFlowGraph) {
+        // 1. 获取跳转目标的名称 (例如 %end_2)
+        let target_bb = jump.target();
+        let bb = dfg.bb(target_bb);
+        let target_name = bb.name().as_ref().unwrap();
+
+        // 2. 处理标签格式 (去掉 %, 去掉 @)
+        let asm_label = target_name.replace("%", "").replace("@", "");
+
+        // 3. 【必须】生成 RISC-V 的无条件跳转指令
+        writeln!(self.output, "  j     {}", asm_label).unwrap();
     }
 }

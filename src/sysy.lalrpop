@@ -86,12 +86,52 @@ ConstInitVal: Box<Exp> = ConstExp;
 // ConstExp ::= Exp;
 ConstExp: Box<Exp> = Exp;
 
-Stmt: Stmt = {
-  "return" <e:Exp?> ";" => Stmt::Return(e),
-   <l:LVal> "=" <e:Exp> ";" => Stmt::Assign(l, e),
-   <b:Block> => Stmt::Block(b),
-   <e:Exp?> ";" => Stmt::Exp(e),
-};
+// =====================================
+// 语句 Stmt (入口)
+// =====================================
+
+// Stmt 包含所有情况
+pub Stmt: Stmt = {
+    MatchedStmt,
+    OpenStmt,
+}
+
+// =====================================
+// 1. MatchedStmt (闭合语句)
+// 这些语句要么没有 if，要么 if 配备了 else，且 else 后面也是闭合的
+// =====================================
+MatchedStmt: Stmt = {
+    // 情况 A: 非 If 语句 (本身就是闭合的)
+    <l:LVal> "=" <e:Exp> ";" => Stmt::Assign(l, e),
+    <e:Exp?> ";" => Stmt::Exp(e),
+    <b:Block> => Stmt::Block(b),
+    "return" <e:Exp?> ";" => Stmt::Return(e),
+
+    // 情况 B: 完整的 If-Else (要求两个分支都是 Matched)
+    // 这里的 "else" <MatchedStmt> 强制了内层必须闭合，消除了歧义
+    "if" "(" <cond:Exp> ")" <then_stmt:MatchedStmt> "else" <else_stmt:MatchedStmt> => {
+        Stmt::If(cond, Box::new(then_stmt), Some(Box::new(else_stmt)))
+    },
+}
+
+// =====================================
+// 2. OpenStmt (开放语句)
+// 这些语句以一个没有 else 的 if 结尾 (悬挂)
+// =====================================
+OpenStmt: Stmt = {
+    // 情况 A: 只有一个 If，没有 Else
+    // 注意：这里的子语句可以是任意 Stmt (Matched 或 Open 均可)
+    "if" "(" <cond:Exp> ")" <then_stmt:Stmt> => {
+        Stmt::If(cond, Box::new(then_stmt), None)
+    },
+
+    // 情况 B: 有 Else，但 Else 分支本身是 Open 的
+    // 注意：then 分支必须是 MatchedStmt！这是消除歧义的关键！
+    // 如果 then 分支是 Open 的 (例如 if (a) if (b) s)，那么 else 就会被解析给内层的 if
+    "if" "(" <cond:Exp> ")" <then_stmt:MatchedStmt> "else" <else_stmt:OpenStmt> => {
+        Stmt::If(cond, Box::new(then_stmt), Some(Box::new(else_stmt)))
+    },
+}
 
 // =====================================
 // 层级 1: 逻辑或 (||) - 优先级最低

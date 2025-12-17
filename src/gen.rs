@@ -35,16 +35,7 @@ impl GenerateProgram for FuncDef {
         gen.set_cur_bb(entry_bb);
 
         // 4. 使用生成器处理函数体
-        for i in &self.block.items {
-            match i {
-                BlockItem::Stmt(exp) => {
-                   gen.generate_stmt(exp);
-                }
-                BlockItem::Decl(decl) => {
-                    gen.generate_decl(decl);
-                }
-            }
-        }
+        gen.generate_block(&self.block);
         Ok(())
     }
 }

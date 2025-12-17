@@ -1,6 +1,6 @@
 use koopa::ir::{
     builder::{BasicBlockBuilder, LocalInstBuilder, ValueBuilder},
-    BasicBlock, BinaryOp, FunctionData, Type, Value,
+    BasicBlock, BinaryOp, FunctionData, Type, Value, ValueKind,
 };
 
 use crate::{
@@ -49,7 +49,7 @@ impl<'a> FunctionGenerator<'a> {
         self.func.dfg_mut().new_bb().basic_block(Some(name))
     }
 
-    // 【核心工具】统一插入指令，自动找对位置
+    // 统一插入指令
     pub fn add_inst(&mut self, inst: Value) {
         let bb = self.get_cur_bb();
         let _ = self
@@ -166,7 +166,7 @@ impl<'a> FunctionGenerator<'a> {
     fn generate_logical_and(&mut self, lhs: &Exp, rhs: &Exp) -> Value {
         // 1. 在 Entry Block 分配一个临时栈变量 result，用于存结果
         //    C 语言逻辑: result 初始化为 0 (False)
-        let entry_bb = self.func.layout().entry_bb().unwrap();
+        let entry_bb = self.get_cur_bb();
         let result_ptr = self.func.dfg_mut().new_value().alloc(Type::get_i32());
         let _ = self
             .func
@@ -244,7 +244,7 @@ impl<'a> FunctionGenerator<'a> {
     fn generate_logical_or(&mut self, lhs: &Exp, rhs: &Exp) -> Value {
         // 1. 分配结果变量，初始化为 1 (True)
         //    如果 LHS 为真，短路跳到 end，结果保持 1
-        let entry_bb = self.func.layout().entry_bb().unwrap();
+        let entry_bb = self.get_cur_bb();
         let result_ptr = self.func.dfg_mut().new_value().alloc(Type::get_i32());
         let _ = self
             .func
@@ -318,12 +318,10 @@ impl<'a> FunctionGenerator<'a> {
 
     pub fn generate_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            // === 赋值 ===
             Stmt::Assign(lval, exp) => {
                 self.generate_assign(lval, exp);
             }
 
-            // === [修改] Return ===
             Stmt::Return(exp_opt) => {
                 let ret_val = if let Some(exp) = exp_opt {
                     // 有返回值: return 0;
@@ -338,14 +336,12 @@ impl<'a> FunctionGenerator<'a> {
                 self.add_inst(ret_inst);
             }
 
-            // === [新增] 代码块 ===
             Stmt::Block(block) => {
                 // 直接递归调用 generate_block
                 // generate_block 内部会处理 symbol_table.enter_scope() / exit_scope()
                 self.generate_block(block);
             }
 
-            // === [新增] 表达式语句 ===
             Stmt::Exp(exp_opt) => {
                 if let Some(exp) = exp_opt {
                     // 计算表达式
@@ -355,22 +351,111 @@ impl<'a> FunctionGenerator<'a> {
                 }
                 // 如果是 None (即空语句 ";")，什么都不做
             }
+
+            Stmt::If(cond, then_stmt, else_stmt) => {
+                self.generate_if(cond, then_stmt, else_stmt.as_deref());
+            }
         }
     }
 
-    fn generate_block(&mut self, block: &Block) {
+    pub fn generate_block(&mut self, block: &Block) {
         // 1. 【关键】进入新作用域
         // 这保证了 { int a; } 里的 a 不会污染外部，也不会跟外部的 a 冲突
         self.symbol_table.enter_scope();
 
         for item in &block.items {
+            if self.is_cur_bb_terminated() {
+                break;
+            }
             match item {
                 BlockItem::Decl(decl) => self.generate_decl(decl),
-                BlockItem::Stmt(stmt) => self.generate_stmt(stmt), // 这里递归调用 generate_stmt
+                BlockItem::Stmt(stmt) => self.generate_stmt(stmt),
             }
         }
 
         // 2. 【关键】退出作用域
         self.symbol_table.exit_scope();
+    }
+
+    fn generate_if(&mut self, cond: &Exp, then_stmt: &Stmt, else_stmt: Option<&Stmt>) {
+        // 1. 创建基本块名字
+        let then_bb = self.new_bb("then");
+        let end_bb = self.new_bb("end");
+
+        // 只有当存在 else 分支时，才需要 else_bb
+        // 如果没有 else，else 跳转的目标就是 end_bb
+        let else_bb = if else_stmt.is_some() {
+            self.new_bb("else")
+        } else {
+            end_bb
+        };
+
+        // 2. 计算条件 & 生成跳转
+        // generate_exp 会生成计算 cond 的指令
+        let cond_val = self.generate_exp(cond);
+
+        // 我们需要把 cond_val (可能是 i32) 转换为 bool (i1) 或者直接跟 0 比较
+        // 生成: bne cond_val, 0, then_bb, else_bb
+        let zero = self.func.dfg_mut().new_value().integer(0);
+        let cond_bool =
+            self.func
+                .dfg_mut()
+                .new_value()
+                .binary(koopa::ir::BinaryOp::NotEq, cond_val, zero);
+        self.add_inst(cond_bool);
+
+        let br = self
+            .func
+            .dfg_mut()
+            .new_value()
+            .branch(cond_bool, then_bb, else_bb);
+        self.add_inst(br);
+
+        // 3. 生成 Then 块
+        let _ = self.func.layout_mut().bbs_mut().push_key_back(then_bb);
+        self.set_cur_bb(then_bb);
+        self.generate_stmt(then_stmt);
+        // Then 块执行完后，跳转到 End
+        // 注意：如果 then_stmt 里已经有 return 了，就不需要 jump 了 (需要检查 BasicBlock 是否已经有 terminator)
+        if !self.is_cur_bb_terminated() {
+            let jump = self.func.dfg_mut().new_value().jump(end_bb);
+            self.add_inst(jump);
+        }
+
+        // 4. 生成 Else 块 (如果有)
+        if let Some(else_body) = else_stmt {
+            let _ = self.func.layout_mut().bbs_mut().push_key_back(else_bb);
+            self.set_cur_bb(else_bb);
+            self.generate_stmt(else_body);
+            if !self.is_cur_bb_terminated() {
+                let jump = self.func.dfg_mut().new_value().jump(end_bb);
+                self.add_inst(jump);
+            }
+        }
+
+        // 5. 生成 End 块
+        let _ = self.func.layout_mut().bbs_mut().push_key_back(end_bb);
+        self.set_cur_bb(end_bb);
+    }
+
+    // 辅助：检查当前 BB 是否已经有终结指令 (ret, jump, br)
+    fn is_cur_bb_terminated(&mut self) -> bool {
+        let bb = self.get_cur_bb();
+        let last: Option<Value> = self
+            .func
+            .layout_mut()
+            .bb_mut(bb)
+            .insts()
+            .back_key()
+            .copied();
+        if let Some(val) = last {
+            println!("{:?}", self.func.dfg().value(val).kind());
+            matches!(
+                self.func.dfg().value(val).kind(),
+                ValueKind::Branch(_) | ValueKind::Jump(_) | ValueKind::Return(_)
+            )
+        } else {
+            false
+        }
     }
 }
