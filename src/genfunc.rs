@@ -15,6 +15,7 @@ pub struct FunctionGenerator<'a> {
     current_bb: Option<BasicBlock>,
     pub symbol_table: SymbolTable,
     name_counter: usize,
+    loop_stack: Vec<LoopInfo>,
 }
 
 impl<'a> FunctionGenerator<'a> {
@@ -24,6 +25,7 @@ impl<'a> FunctionGenerator<'a> {
             current_bb: None,
             symbol_table: SymbolTable::new(),
             name_counter: 1,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -64,6 +66,11 @@ impl<'a> FunctionGenerator<'a> {
     pub fn set_cur_bb(&mut self, bb: BasicBlock) {
         self.current_bb = Some(bb);
     }
+}
+
+struct LoopInfo {
+    entry_bb: BasicBlock, // continue 跳转的目标 (重新判断条件)
+    end_bb: BasicBlock,   // break 跳转的目标 (跳出循环)
 }
 
 impl<'a> FunctionGenerator<'a> {
@@ -355,6 +362,37 @@ impl<'a> FunctionGenerator<'a> {
             Stmt::If(cond, then_stmt, else_stmt) => {
                 self.generate_if(cond, then_stmt, else_stmt.as_deref());
             }
+
+            Stmt::While(cond , body) => {
+                self.generate_while(cond, body);
+            }
+
+            Stmt::Break => {
+                // 1. 获取当前最近的循环信息
+                if let Some(loop_info) = self.loop_stack.last() {
+                    // 2. 生成跳转到 end_bb 的指令
+                    let jump = self.func.dfg_mut().new_value().jump(loop_info.end_bb);
+                    self.add_inst(jump);
+                    
+                    // break 之后的代码是不可达的，不需要继续生成
+                    // (generate_block 里的 is_cur_bb_terminated 会处理截断)
+                } else {
+                    // 语义错误：break 不在循环内
+                    // 实际编译器中应报错，这里 panic 仅作演示
+                    panic!("Semantic Error: 'break' statement not in loop");
+                }
+            }
+
+            Stmt::Continue => {
+                // 1. 获取当前最近的循环信息
+                if let Some(loop_info) = self.loop_stack.last() {
+                    // 2. 生成跳转到 entry_bb (重新判断条件) 的指令
+                    let jump = self.func.dfg_mut().new_value().jump(loop_info.entry_bb);
+                    self.add_inst(jump);
+                } else {
+                    panic!("Semantic Error: 'continue' statement not in loop");
+                }
+            }
         }
     }
 
@@ -438,6 +476,64 @@ impl<'a> FunctionGenerator<'a> {
         self.set_cur_bb(end_bb);
     }
 
+    // 伪代码参考
+    fn generate_while(&mut self, cond: &Exp, body: &Stmt) {
+        let entry_bb = self.new_bb("while_entry"); // 计算条件
+        let body_bb = self.new_bb("while_body"); // 循环体
+        let end_bb = self.new_bb("while_end"); // 结束
+
+        // 1. 从当前块跳入 entry (第一次检查条件)
+        // 如果当前块还没终结
+        if !self.is_cur_bb_terminated() {
+            let jump = self.func.dfg_mut().new_value().jump(entry_bb);
+            self.add_inst(jump);
+        }
+
+        self.loop_stack.push(LoopInfo {
+            entry_bb,
+            end_bb,
+        });
+
+        // 2. 生成 Entry 块 (条件检查)
+        self.func.layout_mut().bbs_mut().push_key_back(entry_bb);
+        self.set_cur_bb(entry_bb);
+
+        let cond_val = self.generate_exp(cond);
+        let zero = self.func.dfg_mut().new_value().integer(0);
+        let cond_bool =
+            self.func
+                .dfg_mut()
+                .new_value()
+                .binary(koopa::ir::BinaryOp::NotEq, cond_val, zero);
+        self.add_inst(cond_bool);
+
+        // 条件成立去 body，不成立去 end
+        let br = self
+            .func
+            .dfg_mut()
+            .new_value()
+            .branch(cond_bool, body_bb, end_bb);
+        self.add_inst(br);
+
+        // 3. 生成 Body 块
+        self.func.layout_mut().bbs_mut().push_key_back(body_bb);
+        self.set_cur_bb(body_bb);
+
+        self.generate_stmt(body);
+
+        // Body 执行完后，必须跳回 Entry 重新检查条件
+        if !self.is_cur_bb_terminated() {
+            let jump_back = self.func.dfg_mut().new_value().jump(entry_bb);
+            self.add_inst(jump_back);
+        }
+
+        self.loop_stack.pop();
+
+        // 4. 生成 End 块 (后续代码)
+        self.func.layout_mut().bbs_mut().push_key_back(end_bb);
+        self.set_cur_bb(end_bb);
+    }
+
     // 辅助：检查当前 BB 是否已经有终结指令 (ret, jump, br)
     fn is_cur_bb_terminated(&mut self) -> bool {
         let bb = self.get_cur_bb();
@@ -449,7 +545,6 @@ impl<'a> FunctionGenerator<'a> {
             .back_key()
             .copied();
         if let Some(val) = last {
-            println!("{:?}", self.func.dfg().value(val).kind());
             matches!(
                 self.func.dfg().value(val).kind(),
                 ValueKind::Branch(_) | ValueKind::Jump(_) | ValueKind::Return(_)

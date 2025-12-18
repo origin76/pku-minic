@@ -112,6 +112,11 @@ MatchedStmt: Stmt = {
     "if" "(" <cond:Exp> ")" <then_stmt:MatchedStmt> "else" <else_stmt:MatchedStmt> => {
         Stmt::If(cond, Box::new(then_stmt), Some(Box::new(else_stmt)))
     },
+    "while" "(" <cond:Exp> ")" <s:MatchedStmt> => {
+        Stmt::While(cond, Box::new(s))
+    },
+    "break" ";" => Stmt::Break,
+    "continue" ";" => Stmt::Continue,
 }
 
 // =====================================
@@ -130,6 +135,10 @@ OpenStmt: Stmt = {
     // 如果 then 分支是 Open 的 (例如 if (a) if (b) s)，那么 else 就会被解析给内层的 if
     "if" "(" <cond:Exp> ")" <then_stmt:MatchedStmt> "else" <else_stmt:OpenStmt> => {
         Stmt::If(cond, Box::new(then_stmt), Some(Box::new(else_stmt)))
+    },
+
+    "while" "(" <cond:Exp> ")" <s:OpenStmt> => {
+        Stmt::While(cond, Box::new(s))
     },
 }
 
