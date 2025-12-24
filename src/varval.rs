@@ -4,7 +4,7 @@ use crate::{ast::{Exp, LVal, VarDecl}, genfunc::FunctionGenerator, scope::Symbol
 
 impl<'a> FunctionGenerator<'a> {
     // 辅助：在 Entry Block 分配局部变量
-    fn alloc_variable(&mut self) -> Value {
+    pub fn alloc_variable(&mut self) -> Value {
         // 1. 获取 Entry Block
         let entry_bb = self.func.layout().entry_bb().unwrap();
         
@@ -55,13 +55,8 @@ impl<'a> FunctionGenerator<'a> {
                 let store = self.func.dfg_mut().new_value().store(val, *ptr);
                 self.add_inst(store);
             }
-            Some(Symbol::Const(_)) => {
-                // 语义检查：常量不可赋值
-                panic!("Error: Cannot assign to constant '{}'", lval.ident);
-            }
-            None => {
-                // 语义检查：变量未定义
-                panic!("Error: Undefined variable '{}'", lval.ident);
+            _ => {
+                panic!("Error: Cannot assign to not lval '{}'", lval.ident);
             }
         }
     }

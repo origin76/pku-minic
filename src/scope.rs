@@ -1,15 +1,16 @@
 use std::collections::HashMap;
-use koopa::ir::Value;
+use koopa::ir::{Value,Function};
 
 #[derive(Debug, Clone)]
 pub enum Symbol {
     // 对于 const int a = 10; 我们直接记录它的整数值
     Const(i32),
-    
     // 对于 int a = 10; 我们记录它在 Koopa IR 中的内存地址 (Alloc 指令的返回值)
     Var(Value), 
+    Func(Function),
 }
 
+#[derive(Clone)]
 pub struct SymbolTable {
     // 作用域栈：每个元素是一个作用域的符号映射
     scopes: Vec<HashMap<String, Symbol>>,
@@ -44,6 +45,12 @@ impl SymbolTable {
     pub fn insert_var(&mut self, name: String, ptr: Value) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, Symbol::Var(ptr));
+        }
+    }
+
+    pub fn insert_func(&mut self, name: String, func: Function) {
+        if let Some(scope) = self.scopes.first_mut() {
+            scope.insert(name, Symbol::Func(func));
         }
     }
 

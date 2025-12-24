@@ -19,11 +19,12 @@ pub struct FunctionGenerator<'a> {
 }
 
 impl<'a> FunctionGenerator<'a> {
-    pub fn new(func: &'a mut FunctionData) -> Self {
+     pub fn new(func: &'a mut FunctionData, global_symbols: SymbolTable) -> Self {
         Self {
             func,
             current_bb: None,
-            symbol_table: SymbolTable::new(),
+            // [修改] 使用传入的符号表 (其中已经包含了所有函数的声明)
+            symbol_table: global_symbols, 
             name_counter: 1,
             loop_stack: Vec::new(),
         }
@@ -81,6 +82,32 @@ impl<'a> FunctionGenerator<'a> {
             Exp::BinaryExp(lhs, op, rhs) => self.generate_binary_exp(lhs, op, rhs),
             Exp::UnaryExp(op, child) => self.generate_unary_exp(op, child),
             Exp::PrimaryExp(p) => self.generate_primary_exp(p),
+            Exp::FuncCall(name, args) => {
+                // 1. 从符号表中查找函数
+                // lookup 应该能查到全局作用域里的函数
+                let callee = match self.symbol_table.lookup(name) {
+                    Some(Symbol::Func(func_handle)) => *func_handle,
+                    Some(_) => panic!("Error: '{}' is not a function", name),
+                    None => panic!("Error: Function '{}' is undefined", name),
+                };
+
+                // 2. 递归计算所有实参的 Value
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    let val = self.generate_exp(arg);
+                    arg_values.push(val);
+                }
+
+                // 3. 生成 Call 指令
+                // call 指令会返回一个 Value (即使是 void 函数，Koopa 也会返回一个 unit 类型的 Value)
+                let call_inst = self.func.dfg_mut().new_value().call(callee, arg_values);
+
+                // 4. 将指令加入当前基本块
+                self.add_inst(call_inst);
+
+                // 5. 返回 call 指令产生的 Value
+                call_inst
+            }
         }
     }
 
@@ -161,6 +188,9 @@ impl<'a> FunctionGenerator<'a> {
                         let load = self.func.dfg_mut().new_value().load(*ptr);
                         self.add_inst(load);
                         load
+                    }
+                    Some(Symbol::Func(_)) => {
+                        panic!("function is not lval");
                     }
                     None => {
                         panic!("Undefined variable: {}", lval.ident);
@@ -363,7 +393,7 @@ impl<'a> FunctionGenerator<'a> {
                 self.generate_if(cond, then_stmt, else_stmt.as_deref());
             }
 
-            Stmt::While(cond , body) => {
+            Stmt::While(cond, body) => {
                 self.generate_while(cond, body);
             }
 
@@ -373,7 +403,7 @@ impl<'a> FunctionGenerator<'a> {
                     // 2. 生成跳转到 end_bb 的指令
                     let jump = self.func.dfg_mut().new_value().jump(loop_info.end_bb);
                     self.add_inst(jump);
-                    
+
                     // break 之后的代码是不可达的，不需要继续生成
                     // (generate_block 里的 is_cur_bb_terminated 会处理截断)
                 } else {
@@ -489,10 +519,7 @@ impl<'a> FunctionGenerator<'a> {
             self.add_inst(jump);
         }
 
-        self.loop_stack.push(LoopInfo {
-            entry_bb,
-            end_bb,
-        });
+        self.loop_stack.push(LoopInfo { entry_bb, end_bb });
 
         // 2. 生成 Entry 块 (条件检查)
         self.func.layout_mut().bbs_mut().push_key_back(entry_bb);
@@ -535,7 +562,7 @@ impl<'a> FunctionGenerator<'a> {
     }
 
     // 辅助：检查当前 BB 是否已经有终结指令 (ret, jump, br)
-    fn is_cur_bb_terminated(&mut self) -> bool {
+    pub fn is_cur_bb_terminated(&mut self) -> bool {
         let bb = self.get_cur_bb();
         let last: Option<Value> = self
             .func

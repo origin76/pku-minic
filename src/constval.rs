@@ -133,6 +133,8 @@ impl<'a> FunctionGenerator<'a> {
                     }
                 }
             }
+            // function isnot const exp
+            _ => panic!("not const exp")
         }
     }
 }

@@ -1,20 +1,29 @@
 use koopa::ir::BinaryOp;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct CompUnit {
-    pub func_def: FuncDef,
+    // 变更: 现在是一个列表
+    pub func_defs: Vec<FuncDef>,
 }
 
 #[derive(Debug,Clone)]
 pub struct FuncDef {
     pub func_type: Type,
     pub ident: String,
+    pub params: Vec<FuncFParam>,
     pub block: Block,
+}
+#[derive(Debug, Clone)]
+pub struct FuncFParam {
+    pub b_type: Type, // 目前只有 int
+    pub ident: String,
+    // 未来可能还有数组维度
 }
 
 #[derive(Debug,Clone)]
 pub enum Type {
     Int,
+    Void,
 }
 
 #[derive(Debug, Clone)]
@@ -83,8 +92,9 @@ pub enum Exp {
     BinaryExp(Box<Exp>, BinaryOp, Box<Exp>),
     // 一元运算 (直接在 Exp 层递归)
     UnaryExp(UnaryOp, Box<Exp>),
-    // 【必须】基础表达式 (用于通过 Number 终止递归)
+    // 基础表达式 (用于通过 Number 终止递归)
     PrimaryExp(Box<PrimaryExp>), 
+    FuncCall(String, Vec<Box<Exp>>), 
 }
 
 #[derive(Debug,Clone)]

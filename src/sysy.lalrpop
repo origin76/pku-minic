@@ -11,7 +11,8 @@ Comma<T>: Vec<T> = {
         let mut v = vec![h];
         v.extend(t);
         v
-    }
+    },
+    => vec![],
 };
 
 // 约束 lexer 的行为
@@ -25,15 +26,29 @@ match {
     _
 }
 
-pub CompUnit: CompUnit = <func_def: FuncDef> => CompUnit { <> };
+pub CompUnit: CompUnit = <funcs:FuncDef*> => CompUnit { func_defs: funcs };
 
-FuncDef: FuncDef = {
-  <func_type: Type> <ident: Ident> "(" ")" <block: Block> => {
-    FuncDef { <> }
-  }
+pub FuncDef: FuncDef = {
+    <t:Type> <id:Ident> "(" <params:Comma<FuncFParam>> ")" <b:Block> => FuncDef {
+        func_type: t,
+        ident: id,
+        params: params,
+        block: b,
+    }
 }
 
-Type: Type = "int" => Type::Int;
+// FuncFParam ::= BType IDENT;
+FuncFParam: FuncFParam = {
+    <t:Type> <id:Ident> => FuncFParam {
+        b_type: t,
+        ident: id,
+    }
+}
+
+Type: Type = {
+    "void" => Type::Void,
+    "int" => Type::Int,
+}
 
 Block: Block = "{" <items:BlockItem*> "}" => Block { items };
 
@@ -210,6 +225,7 @@ MulExp: Box<Exp> = {
 // 对应 BNF: UnaryExp ::= PrimaryExp | UnaryOp UnaryExp;
 // =====================================
 UnaryExp: Box<Exp> = {
+    <id:Ident> "(" <args:Comma<Exp>> ")" => Box::new(Exp::FuncCall(id, args)),
     // 递归调用 UnaryExp 以支持右结合 (如 - - 5)
     <op:UnaryOp> <e:UnaryExp> => Box::new(Exp::UnaryExp(op, e)),
     // 降级到 PrimaryExp，需要包装成 Exp 类型
