@@ -1,9 +1,14 @@
 use koopa::ir::BinaryOp;
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
+pub enum GlobalItem {
+    Decl(Decl),       // 全局变量/常量声明
+    FuncDef(FuncDef), // 函数定义
+}
+
+#[derive(Debug, Clone)]
 pub struct CompUnit {
-    // 变更: 现在是一个列表
-    pub func_defs: Vec<FuncDef>,
+    pub items: Vec<GlobalItem>,
 }
 
 #[derive(Debug,Clone)]

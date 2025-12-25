@@ -16,6 +16,7 @@ mod asm;
 mod scope;
 mod constval;
 mod varval;
+mod decl;
 
 lalrpop_mod!(sysy);
 

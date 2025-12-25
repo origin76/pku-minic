@@ -26,7 +26,17 @@ match {
     _
 }
 
-pub CompUnit: CompUnit = <funcs:FuncDef*> => CompUnit { func_defs: funcs };
+pub CompUnit: CompUnit = <items:GlobalItem*> => CompUnit { 
+    items: items 
+};
+
+GlobalItem: GlobalItem = {
+    // 匹配声明 (const int a = 1; 或 int a = 2;)
+    <d:Decl> => GlobalItem::Decl(d),
+    
+    // 匹配函数定义 (int main() { ... })
+    <f:FuncDef> => GlobalItem::FuncDef(f),
+}
 
 pub FuncDef: FuncDef = {
     <t:Type> <id:Ident> "(" <params:Comma<FuncFParam>> ")" <b:Block> => FuncDef {
