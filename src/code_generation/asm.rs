@@ -882,7 +882,7 @@ impl<'a> AsmBuilder<'a> {
         writeln!(self.output, "#RET_PLACEHOLDER#").unwrap();
     }
 
-    fn process_alloc(&mut self, result_val: Value, _alloc: &Alloc, _dfg: &DataFlowGraph) {
+    fn process_alloc(&mut self, _result_val: Value, _alloc: &Alloc, _dfg: &DataFlowGraph) {
       {}
     }
     fn process_load(&mut self, result_val: Value, load: &Load, dfg: &DataFlowGraph) {

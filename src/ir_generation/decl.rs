@@ -1,6 +1,6 @@
 use koopa::ir::{Program, builder::{GlobalInstBuilder, ValueBuilder}};
 
-use crate::{ast::Decl, constval::evaluate_const_exp, scope::SymbolTable};
+use crate::{parser::ast::Decl, ir_generation::constval::evaluate_const_exp, analysis::scope::SymbolTable};
 
 // 辅助函数：处理全局声明
 pub fn process_global_decl(program: &mut Program, symbol_table: &mut SymbolTable, decl: &Decl) {

@@ -38,7 +38,7 @@ GlobalItem: GlobalItem = {
     <f:FuncDef> => GlobalItem::FuncDef(f),
 }
 
-pub FuncDef: FuncDef = {
+FuncDef: FuncDef = {
     <t:Type> <id:Ident> "(" <params:Comma<FuncFParam>> ")" <b:Block> => FuncDef {
         func_type: t,
         ident: id,
@@ -116,7 +116,7 @@ ConstExp: Box<Exp> = Exp;
 // =====================================
 
 // Stmt 包含所有情况
-pub Stmt: Stmt = {
+Stmt: Stmt = {
     MatchedStmt,
     OpenStmt,
 }
@@ -171,7 +171,7 @@ OpenStmt: Stmt = {
 // 层级 1: 逻辑或 (||) - 优先级最低
 // 对应 BNF: LOrExp ::= LAndExp | LOrExp "||" LAndExp;
 // =====================================
-pub Exp: Box<Exp> = LOrExp; // 入口指向 LOrExp
+Exp: Box<Exp> = LOrExp; // 入口指向 LOrExp
 
 LOrExp: Box<Exp> = {
     <l:LOrExp> "||" <r:LAndExp> => Box::new(Exp::BinaryExp(l, BinaryOp::Or, r)),

@@ -1,9 +1,9 @@
-use crate::ast::Type;
-use crate::ast::*;
-use crate::decl::process_global_decl;
-use crate::genfunc::FunctionGenerator;
-use crate::scope::{Symbol, SymbolTable};
-use koopa::ir::{builder_traits::*, Value};
+use crate::parser::ast::Type;
+use crate::parser::ast::*;
+use crate::ir_generation::decl::process_global_decl;
+use crate::ir_generation::genfunc::FunctionGenerator;
+use crate::analysis::scope::{Symbol, SymbolTable};
+use koopa::ir::{builder_traits::*};
 use koopa::ir::{FunctionData, Program, Type as IrType};
 
 pub trait GenerateProgram {
@@ -70,7 +70,7 @@ fn generate_single_function(func_def: &FuncDef, program: &mut Program, symbol_ta
         .dfg_mut()
         .new_bb()
         .basic_block(Some("%entry".to_string()));
-    gen.func.layout_mut().bbs_mut().push_key_back(entry_bb);
+    let _ = gen.func.layout_mut().bbs_mut().push_key_back(entry_bb);
     gen.set_cur_bb(entry_bb);
 
     // =========================================================

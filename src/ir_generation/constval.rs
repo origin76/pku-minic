@@ -1,7 +1,7 @@
 use koopa::ir::BinaryOp;
 
 use crate::{
-    ast::*, genfunc::FunctionGenerator, scope::{Symbol, SymbolTable}
+    parser::ast::*, ir_generation::genfunc::FunctionGenerator, analysis::scope::{Symbol, SymbolTable}
 };
 
 impl<'a> FunctionGenerator<'a> {

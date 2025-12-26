@@ -1,6 +1,6 @@
 use koopa::ir::{Type, Value, builder::*};
 
-use crate::{ast::{Exp, LVal, VarDecl}, genfunc::FunctionGenerator, scope::Symbol};
+use crate::{parser::ast::{Exp, LVal, VarDecl}, ir_generation::genfunc::FunctionGenerator, analysis::scope::Symbol};
 
 impl<'a> FunctionGenerator<'a> {
     // 辅助：在 Entry Block 分配局部变量

@@ -4,8 +4,8 @@ use koopa::ir::{
 };
 
 use crate::{
-    ast::{Block, BlockItem, Exp, LVal, PrimaryExp, Stmt, UnaryOp},
-    scope::{Symbol, SymbolTable},
+    parser::ast::{Block, BlockItem, Exp, PrimaryExp, Stmt, UnaryOp},
+    analysis::scope::{Symbol, SymbolTable},
 };
 
 pub struct FunctionGenerator<'a> {
@@ -522,7 +522,7 @@ impl<'a> FunctionGenerator<'a> {
         self.loop_stack.push(LoopInfo { entry_bb, end_bb });
 
         // 2. 生成 Entry 块 (条件检查)
-        self.func.layout_mut().bbs_mut().push_key_back(entry_bb);
+        let _ = self.func.layout_mut().bbs_mut().push_key_back(entry_bb);
         self.set_cur_bb(entry_bb);
 
         let cond_val = self.generate_exp(cond);
@@ -543,7 +543,7 @@ impl<'a> FunctionGenerator<'a> {
         self.add_inst(br);
 
         // 3. 生成 Body 块
-        self.func.layout_mut().bbs_mut().push_key_back(body_bb);
+        let _ = self.func.layout_mut().bbs_mut().push_key_back(body_bb);
         self.set_cur_bb(body_bb);
 
         self.generate_stmt(body);
@@ -557,7 +557,7 @@ impl<'a> FunctionGenerator<'a> {
         self.loop_stack.pop();
 
         // 4. 生成 End 块 (后续代码)
-        self.func.layout_mut().bbs_mut().push_key_back(end_bb);
+        let _ = self.func.layout_mut().bbs_mut().push_key_back(end_bb);
         self.set_cur_bb(end_bb);
     }
 
