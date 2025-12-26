@@ -1,11 +1,16 @@
 use koopa::ir::{
-    BasicBlock, BinaryOp, FunctionData, Program, Value, ValueKind, dfg::DataFlowGraph, layout::BasicBlockNode, values::{Alloc, Binary, Branch, Jump, Load, Return, Store}
+    dfg::DataFlowGraph,
+    layout::BasicBlockNode,
+    values::{Alloc, Binary, Branch, Call, Jump, Load, Return, Store},
+    BasicBlock, BinaryOp, FunctionData, Program, Value, ValueKind,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
 
 // 1. 定义寄存器分配/状态管理的上下文
 struct FuncContext {
+    name: String,
+
     phys_regs: Vec<&'static str>,
 
     // 记录每个物理寄存器的状态 (index 对应 phys_regs)
@@ -21,14 +26,18 @@ struct FuncContext {
 
     // 当前栈帧大小 (用于分配新的 slot)
     stack_size: i32,
+    total_frame_size : i32,
 
     // 最近使用记录 (用于 LRU 算法，决定谁被 Spill)
     // 存的是 PhysRegIndex
     lru_queue: VecDeque<usize>,
 
-    // 【新增】当前被锁定的寄存器索引集合
     // 正在处理的指令的操作数不能被 Spill
     locked_regs: HashSet<usize>,
+
+    // 当前函数内所有 Call 指令中，最大的参数溢出空间
+    // 如果所有 Call 的参数都 <= 8，这里就是 0
+    max_outgoing_args_size: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +50,7 @@ struct RegInfo {
 }
 
 impl FuncContext {
-    pub fn new() -> Self {
+    pub fn new(name: String) -> Self {
         // 定义可用的临时寄存器，根据 RISC-V 约定
         // 优先使用 t0-t6, a0-a7
         let regs = vec![
@@ -51,13 +60,14 @@ impl FuncContext {
 
         let reg_count = regs.len();
 
-        // 初始化 LRU 队列，顺序无所谓
+        // 初始化 LRU 队列
         let mut lru = VecDeque::new();
         for i in 0..reg_count {
             lru.push_back(i);
         }
 
         Self {
+            name,
             phys_regs: regs,
             reg_status: vec![
                 RegInfo {
@@ -69,8 +79,10 @@ impl FuncContext {
             value_in_reg: HashMap::new(),
             stack_slots: HashMap::new(),
             stack_size: 0, // 初始栈偏移，视你的栈帧设计而定
+            total_frame_size : 0,
             lru_queue: lru,
             locked_regs: HashSet::new(),
+            max_outgoing_args_size: 0,
         }
     }
 
@@ -241,30 +253,120 @@ impl FuncContext {
         self.stack_slots.insert(val, offset);
         offset
     }
+
+    /// 将所有当前占用的寄存器强制写回栈，并清空状态
+    pub fn spill_all(&mut self, output: &mut String) {
+        for i in 0..self.reg_status.len() {
+            // 我们不能直接在这里 borrow self.reg_status[i]，因为还要调用 methods
+            // 所以先拷贝状态
+            let (val_opt, is_dirty) = {
+                let info = &self.reg_status[i];
+                (info.value, info.dirty)
+            };
+
+            if let Some(val) = val_opt {
+                let reg_name = self.phys_regs[i];
+
+                // 如果是 dirty，写回栈
+                if is_dirty {
+                    let offset = self.get_or_alloc_stack_slot(val);
+                    writeln!(output, "  sw    {}, {}(sp)", reg_name, offset).unwrap();
+                }
+
+                // 无论是否 dirty，都要移除映射
+                // 因为 call 返回后，寄存器里的值已经不可信了
+                self.value_in_reg.remove(&val);
+            }
+
+            // 清理状态
+            let info = &mut self.reg_status[i];
+            info.value = None;
+            info.dirty = false;
+        }
+    }
+
+    /// 分析整个函数的栈帧需求，计算总大小并为每个变量预分配栈槽
+    pub fn analyze_frame(&mut self, func: &FunctionData) {
+        // ==========================================
+        // 步骤 1: 扫描最大的函数调用参数空间 (Outgoing Args)
+        // 这个区域位于栈的最底部 (0(sp) ~ max_args_space(sp))
+        // ==========================================
+        let mut max_args_space = 0;
+
+        for (_, bb_node) in func.layout().bbs() {
+            for (&inst,_) in bb_node.insts() {
+                // 检查是否是 Call 指令
+                if let ValueKind::Call(call) = func.dfg().value(inst).kind() {
+                    let arg_count = call.args().len();
+                    if arg_count > 8 {
+                        // 超过 8 个的参数需要存栈，每个 4 字节
+                        let space = (arg_count - 8) as i32 * 4;
+                        if space > max_args_space {
+                            max_args_space = space;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.max_outgoing_args_size = max_args_space;
+
+        // ==========================================
+        // 步骤 2: 为所有局部变量 (Alloc / Spill) 分配空间
+        // 这个区域紧接着参数区之上
+        // ==========================================
+        let mut current_offset = self.max_outgoing_args_size;
+
+        for (_, bb_node) in func.layout().bbs() {
+            for (&inst,_) in bb_node.insts() {
+                let ty = func.dfg().value(inst).ty();
+                
+                // 凡是有返回值的指令，都预留一个栈槽 (全栈策略)
+                // 这样无论何时 Spill，都有地方去
+                if !ty.is_unit() {
+                    self.stack_slots.insert(inst, current_offset);
+                    current_offset += 4; // 假设都是 4 字节
+                }
+            }
+        }
+
+        // 记录除去 RA/S0 之外的栈大小 (用于调试或特定计算)
+        self.stack_size = current_offset;
+
+        // ==========================================
+        // 步骤 3: 计算最终对齐的总大小
+        // 加上 RA(4) + S0(4) = 8 字节
+        // ==========================================
+        let size_with_regs = self.stack_size + 8;
+        
+        // 16 字节对齐
+        self.total_frame_size = (size_with_regs + 15) & !15;
+    }
 }
 
 // 2. 定义代码生成器主结构体
-pub struct AsmBuilder {
+pub struct AsmBuilder<'a> {
     // 最终输出的汇编字符串
     pub output: String,
     // Option 是因为在处理全局变量时可能不需要它，或者用来显式控制生命周期
     ctx: Option<FuncContext>,
+    program: &'a Program,
 }
 
-impl AsmBuilder {
-    pub fn new() -> Self {
+impl<'a> AsmBuilder<'a> {
+    pub fn new(program: &'a Program) -> Self {
         Self {
             output: String::new(),
             ctx: None,
+            program,
         }
     }
 
     pub fn generate_program(&mut self, program: &Program) {
-        // 1. 先生成全局变量 (.data) 等
-        // ...
+        for &value in program.inst_layout() {
+            self.generate_global(program, value);
+        }
 
-        // 2. 遍历函数
-        // 你的 IR 结构：(_func_handle, func_data)
         for (_func, func_data) in program.funcs() {
             // 如果只有声明没有定义的函数（比如库函数），通常 func_data.layout().entry_bb() 是 None
             if func_data.layout().entry_bb().is_some() {
@@ -273,90 +375,156 @@ impl AsmBuilder {
         }
     }
 
-    // 生成单个函数
+    fn generate_global(&mut self, program: &Program, value: Value) {
+        // 获取 Value 的详细数据
+        let value_data = program.borrow_value(value);
+
+        // 我们只关心 GlobalAlloc 指令
+        if let ValueKind::GlobalAlloc(alloc) = value_data.kind() {
+            // 1. 获取变量名 (去掉 @ 前缀)
+            let name = value_data.name().as_ref().unwrap().replace("@", "");
+
+            // 2. 获取初始值
+            let init_val = alloc.init();
+            let init_data = program.borrow_value(init_val);
+
+            // 3. 根据初始值类型决定放入 .data 还是 .bss
+            match init_data.kind() {
+                // === 情况 A: 整数初始化 (int a = 10;) -> .data ===
+                ValueKind::Integer(int) => {
+                    let _ = writeln!(self.output, "  .data"); // 切换到数据段
+                    let _ = writeln!(self.output, "  .globl {}", name);
+                    let _ = writeln!(self.output, "{}:", name);
+                    let _ = writeln!(self.output, "  .word {}", int.value()); // 写入 4 字节整数
+                    let _ = writeln!(self.output, ""); // 空行美观
+                }
+
+                // === 情况 B: 零初始化 (int a;) -> .bss ===
+                ValueKind::ZeroInit(_) => {
+                    let _ = writeln!(self.output, "  .bss"); // 切换到 BSS 段
+                    let _ = writeln!(self.output, "  .globl {}", name);
+                    let _ = writeln!(self.output, "{}:", name);
+                    // .zero N 表示分配 N 字节并填 0
+                    // i32 占 4 字节
+                    let _ = writeln!(self.output, "  .zero 4");
+                    let _ = writeln!(self.output, "");
+                }
+
+                // === 情况 C: 聚合类型 (数组) ===
+                // 如果你以后支持数组，这里会是 ValueKind::Aggregate
+                // 需要递归生成 .word 或 .zero
+                _ => {
+                    // 暂时处理不了复杂类型，或者留空
+                }
+            }
+        }
+    }
+
     fn generate_function(&mut self, func: &FunctionData) {
         // 1. 【重置上下文】
-        self.ctx = Some(FuncContext::new());
+        self.ctx = Some(FuncContext::new(func.name().to_string()));
+        self.ctx.as_mut().unwrap().analyze_frame(func);
 
-        // 2. 打印函数标签到【最终输出】
+        // 2. 打印函数标签
         let name = &func.name()[1..];
-        // 注意：这里还是写到 self.output，因为标签是在函数最前面的
         writeln!(self.output, "\n  .text").unwrap();
         writeln!(self.output, "  .globl {}", name).unwrap();
         writeln!(self.output, "{}:", name).unwrap();
 
-        // === 【关键步骤 A】 准备临时缓冲区 ===
-        // 我们把 self.output 里的内容（主要是前面的全局代码）先移走，
-        // 或者创建一个新的 String 给函数体用。
-        // 为了不修改 generate_bb 等函数的签名，我们用 std::mem::take 偷梁换柱。
-
-        // 保存之前的 output (包含 .data 和 函数标签)
+        // 保存 output，用于暂存函数体
         let mut final_output = std::mem::take(&mut self.output);
 
-        // 此时 self.output 变成了空字符串，用来暂存函数体汇编
-
-        // 3. 遍历基本块生成指令 (生成的代码会进入 self.output 暂存)
+        // 3. 遍历基本块生成指令
         let dfg = func.dfg();
         for (bb_handle, node) in func.layout().bbs() {
             self.generate_bb(bb_handle, node, dfg);
         }
 
-        // === 【关键步骤 B】 计算最终栈大小并对齐 ===
+        // === 【关键步骤 B】 计算最终栈大小 ===
         let ctx = self.ctx.as_ref().unwrap();
-        // RISC-V 要求栈指针 16 字节对齐
-        let raw_stack_size = ctx.stack_size;
-        let align_stack_size = (raw_stack_size + 15) & !15;
 
-        // === 【关键步骤 C】 组装最终代码 ===
+        // 16 字节对齐
+        let align_stack_size = ctx.total_frame_size;
 
-        // C1. 写入 Prologue (分配栈空间) 到 final_output
-        if align_stack_size > 0 {
-            // 支持大立即数处理
-            if align_stack_size < 2048 {
-                writeln!(final_output, "  addi  sp, sp, -{}", align_stack_size).unwrap();
-            } else {
-                writeln!(final_output, "  li    t0, -{}", align_stack_size).unwrap();
-                writeln!(final_output, "  add   sp, sp, t0").unwrap();
-            }
+        // === 【关键步骤 C】 组装 Prologue (序言) ===
+        // 栈布局 (High -> Low):
+        // [ ... Caller Stack ... ]
+        // [ RA (Ret Addr)        ] <- align_stack_size - 4
+        // [ S0 (Old FP)          ] <- align_stack_size - 8
+        // [ ... Locals/Spill ... ]
+        // [ ... Outgoing Args... ]
+        // [ ... Current SP ...   ] <- 0
+
+        if align_stack_size < 2048 {
+            // --- 情况 A: 栈帧较小 (直接用立即数) ---
+            writeln!(final_output, "  addi  sp, sp, -{}", align_stack_size).unwrap();
+            writeln!(final_output, "  sw    ra, {}(sp)", align_stack_size - 4).unwrap();
+            writeln!(final_output, "  sw    s0, {}(sp)", align_stack_size - 8).unwrap();
+        } else {
+            // --- 情况 B: 栈帧较大 (需要计算地址) ---
+            // 1. 调整 SP
+            writeln!(final_output, "  li    t0, -{}", align_stack_size).unwrap();
+            writeln!(final_output, "  add   sp, sp, t0").unwrap();
+
+            // 2. 保存 ra, s0 (因为偏移量太大，不能直接 sw ra, 20000(sp))
+            // 先计算栈顶地址到 t0: t0 = sp + align_stack_size
+            writeln!(final_output, "  li    t0, {}", align_stack_size).unwrap();
+            writeln!(final_output, "  add   t0, sp, t0").unwrap();
+
+            writeln!(final_output, "  sw    ra, -4(t0)").unwrap();
+            writeln!(final_output, "  sw    s0, -8(t0)").unwrap();
         }
 
-        // C2. 处理 Epilogue (替换占位符)
-        // 从 self.output (暂存区) 拿出生成的函数体
-        let body_asm = std::mem::take(&mut self.output);
-
-        // 构造真正的 return 序列
-        let epilogue = if align_stack_size > 0 {
-            if align_stack_size < 2048 {
-                format!("  addi  sp, sp, {}\n  ret", align_stack_size)
-            } else {
-                format!(
-                    "  li    t0, {}\n  add   sp, sp, t0\n  ret",
-                    align_stack_size
-                )
-            }
+        // === 【关键步骤 D】 组装 Epilogue (结语) ===
+        // 构造恢复现场的指令序列
+        let epilogue = if align_stack_size < 2048 {
+            format!(
+                "  lw    ra, {0}(sp)\n  lw    s0, {1}(sp)\n  addi  sp, sp, {2}\n  ret",
+                align_stack_size - 4,
+                align_stack_size - 8,
+                align_stack_size
+            )
         } else {
-            "  ret".to_string()
+            // 大栈帧恢复
+            // 1. 恢复 ra, s0 (先算栈顶地址)
+            format!(
+                "  li    t0, {0}\n  add   t0, sp, t0\n  lw    ra, -4(t0)\n  lw    s0, -8(t0)\n  li    t0, {0}\n  add   sp, sp, t0\n  ret",
+                align_stack_size
+            )
         };
 
-        // 将占位符替换为真正的 epilogue
-        // 假设我们在 process_ret 里写入了 "#RET_PLACEHOLDER#"
+        // 获取暂存的函数体汇编
+        let body_asm = std::mem::take(&mut self.output);
+
+        // 替换占位符
         let final_body = body_asm.replace("#RET_PLACEHOLDER#", &epilogue);
 
-        // C3. 将处理好的函数体追加到 final_output
+        // === 【关键步骤 E】 合并与还原 ===
         final_output.push_str(&final_body);
-
-        // === 【关键步骤 D】 还原 self.output ===
         self.output = final_output;
         self.ctx = None;
     }
 
+    fn get_bb_label(&self, bb: &BasicBlock , dfg: &DataFlowGraph) -> String {
+        // 1. 获取函数名，并去掉开头的 '@'
+        // self.func.name() 返回的是 "@main"，我们需要 "main"
+        let func_name = &self.ctx.as_ref().unwrap().name[1..];
+        
+        // 2. 获取基本块名，并去掉开头的 '%'
+        // bb_name 返回的是 "%entry" 或 "%while_entry_1"，我们需要 "entry"
+        let raw_bb_name = dfg.bb(*bb).name().as_ref().unwrap();
+        let bb_name = &raw_bb_name[1..];
+
+        // 3. 拼接成标准格式: .L<func>_<bb>
+        format!(".L{}_{}", func_name, bb_name)
+    }
+
     fn generate_bb(&mut self, bb: &BasicBlock, node: &BasicBlockNode, dfg: &DataFlowGraph) {
-        let bb_data = dfg.bbs().get(bb).unwrap();
         // 生成基本块标签，例如 .L0:
         // 如果是入口块，有些汇编器不需要标签，但加上也无妨
         // 你可以用 HashMap 映射 bb handle 到标签名，或者直接用名字
-        let bb_name = &bb_data.name().clone().unwrap_or("unknown_bb".into())[1..];
-        let _ = writeln!(self.output, "{}:", bb_name);
+        let label = self.get_bb_label(bb, dfg);
+        let _ = writeln!(self.output, "{}:", label);
 
         // 遍历指令
         for (val, _inst_node) in node.insts() {
@@ -392,11 +560,34 @@ impl AsmBuilder {
             ValueKind::Jump(j) => {
                 self.process_jump(j, dfg);
             }
+            ValueKind::Call(c) => {
+                self.process_call(inst, c, dfg);
+            }
             _ => {}
         }
     }
 
     fn resolve_operand(&mut self, val: Value, dfg: &DataFlowGraph) -> String {
+        if val.is_global() {
+            // 1. 从 Program 中获取数据 (不能用 dfg.value!)
+            let data = self.program.borrow_value(val);
+            
+            // 2. 获取全局变量名字 (去掉 @)
+            let name = data.name().as_ref().expect("Global must have name").replace("@", "");
+
+            // 3. 生成加载地址指令 (la reg, symbol)
+            // 因为 resolve_operand 的契约是返回一个"存有该值的寄存器"
+            // 对于全局变量指针，我们需要把它的地址 load 到临时寄存器里
+            let tmp_reg = self
+                .ctx
+                .as_mut()
+                .unwrap()
+                .get_temp_reg_for_address_calc(&mut self.output);
+            
+            writeln!(self.output, "  la    {}, {}", tmp_reg, name).unwrap();
+            
+            return tmp_reg.to_string();
+        }
         let value_data = dfg.value(val);
 
         match value_data.kind() {
@@ -429,6 +620,50 @@ impl AsmBuilder {
                     self.ctx.as_mut().unwrap().lock_reg(reg_name);
 
                     reg_name.to_string()
+                }
+            }
+
+            koopa::ir::ValueKind::FuncArgRef(arg) => {
+                let index = arg.index();
+                if index < 8 {
+                    // 如果是前 8 个参数，直接返回对应的物理寄存器名
+                    format!("a{}", index)
+                } else {
+                    if index < 8 {
+                        // 情况 A: 寄存器传参 (a0 - a7)
+                        format!("a{}", index)
+                    } else {
+                        // 情况 B: 栈传参 (index >= 8)
+                        // 1. 获取当前函数的栈帧大小
+                        // 注意：这要求你在 generate_function 开头已经计算好了 ctx.stack_size (align_stack_size)
+                        let frame_size = self.ctx.as_ref().unwrap().total_frame_size;
+                        // 如果你的 stack_size 还没加上 ra/s0 的 8 字节，记得加上:
+                        // let frame_size = self.ctx.as_ref().unwrap().raw_stack_size_with_ra_s0_aligned;
+
+                        // 2. 计算相对于当前 SP 的偏移量
+                        let offset = frame_size + (index as i32 - 8) * 4;
+
+                        // 3. 申请一个临时寄存器来存放加载进来的参数
+                        // 因为 resolve_operand 必须返回一个寄存器名供后续指令使用
+                        let tmp_reg = self
+                            .ctx
+                            .as_mut()
+                            .unwrap()
+                            .get_temp_reg_for_address_calc(&mut self.output);
+
+                        // 4. 生成 Load 指令 (注意处理大立即数)
+                        if offset >= -2048 && offset <= 2047 {
+                            writeln!(self.output, "  lw    {}, {}(sp)", tmp_reg, offset).unwrap();
+                        } else {
+                            // 偏移量太大，需要先算地址
+                            writeln!(self.output, "  li    {}, {}", tmp_reg, offset).unwrap();
+                            writeln!(self.output, "  add   {}, {}, sp", tmp_reg, tmp_reg).unwrap();
+                            writeln!(self.output, "  lw    {}, 0({})", tmp_reg, tmp_reg).unwrap();
+                        }
+
+                        // 5. 返回临时寄存器名
+                        tmp_reg.to_string()
+                    }
                 }
             }
 
@@ -642,24 +877,13 @@ impl AsmBuilder {
 
         // 2. 【关键】写入占位符
         // 后续会在 generate_function 结束时被替换为真正的 Epilogue (恢复栈指针 + ret)
+        self.ctx.as_mut().unwrap().spill_all(&mut self.output);
+
         writeln!(self.output, "#RET_PLACEHOLDER#").unwrap();
     }
 
     fn process_alloc(&mut self, result_val: Value, _alloc: &Alloc, _dfg: &DataFlowGraph) {
-        // 1. 分配栈槽
-        // 假设 alloc i32 占 4 字节
-        let offset = self.ctx.as_mut().unwrap().stack_size;
-        self.ctx.as_mut().unwrap().stack_size += 4; // 仅仅增加计数器
-
-        // 2. 记录映射：这个 IR Value 对应栈上的这个偏移
-        // 【关键】不要调用 alloc_reg_for_result！不要给它分配寄存器！
-        self.ctx
-            .as_mut()
-            .unwrap()
-            .stack_slots
-            .insert(result_val, offset);
-
-        // 3. 函数结束，什么汇编都不写
+      {}
     }
     fn process_load(&mut self, result_val: Value, load: &Load, dfg: &DataFlowGraph) {
         let src_ptr = load.src();
@@ -737,24 +961,98 @@ impl AsmBuilder {
 
     fn process_branch(&mut self, br: &Branch, dfg: &DataFlowGraph) {
         let cond_reg = self.resolve_operand(br.cond(), dfg);
-        let true_bb_data = dfg.bbs().get(&br.true_bb()).unwrap();
-        let true_name = &true_bb_data.name().as_ref().unwrap()[1..];
-        let false_bb_data = dfg.bbs().get(&br.false_bb()).unwrap();
-        let false_name = &false_bb_data.name().as_ref().unwrap()[1..];
+        let true_name = self.get_bb_label(&br.true_bb(), dfg);
+        let false_name = self.get_bb_label(&br.false_bb(), dfg);
+        
+        self.ctx.as_mut().unwrap().spill_all(&mut self.output);
+
         let _ = writeln!(self.output, "  bnez  {}, {}", cond_reg, true_name);
         let _ = writeln!(self.output, "  j     {}", false_name);
     }
     // 在 generate_inst 或 process_jump 中
     fn process_jump(&mut self, jump: &Jump, dfg: &DataFlowGraph) {
+
+        self.ctx.as_mut().unwrap().spill_all(&mut self.output);
+
         // 1. 获取跳转目标的名称 (例如 %end_2)
         let target_bb = jump.target();
-        let bb = dfg.bb(target_bb);
-        let target_name = bb.name().as_ref().unwrap();
+        let target_name = self.get_bb_label(&target_bb, dfg);
 
         // 2. 处理标签格式 (去掉 %, 去掉 @)
         let asm_label = target_name.replace("%", "").replace("@", "");
 
         // 3. 【必须】生成 RISC-V 的无条件跳转指令
         writeln!(self.output, "  j     {}", asm_label).unwrap();
+    }
+
+    fn process_call(&mut self, inst_val: Value, call: &Call, dfg: &DataFlowGraph) {
+        // 1. 【关键】保护现场：Spill 所有活跃寄存器
+        // 必须在处理参数之前做，否则参数计算用的寄存器也会被清理
+        // 但这里有个技巧：参数也是 Value，如果先 Spill，后面 get_reg 会重新 load，虽然慢但安全。
+        // 为了性能，通常先计算参数，再 Spill 其他的。
+        // 简单起见，我们先 Spill All，绝对安全。
+        self.ctx.as_mut().unwrap().spill_all(&mut self.output);
+
+        let args = call.args();
+
+        // 2. 传递参数
+        for (i, &arg) in args.iter().enumerate() {
+            // 获取参数的值 (Load 到寄存器)
+            let val_data = dfg.value(arg);
+            let val_reg = match val_data.kind() {
+                // 情况 A: 参数是立即数 (half(10))
+                koopa::ir::ValueKind::Integer(int) => {
+                    let imm = int.value();
+                    let tmp = self
+                        .ctx
+                        .as_mut()
+                        .unwrap()
+                        .get_temp_reg_for_address_calc(&mut self.output);
+                    writeln!(self.output, "  li    {}, {}", tmp, imm).unwrap();
+                    tmp.to_string()
+                }
+                // 情况 B: 参数是变量
+                _ => self
+                    .ctx
+                    .as_mut()
+                    .unwrap()
+                    .get_reg_for_operand(arg, &mut self.output)
+                    .to_string(),
+            };
+
+            if i < 8 {
+                // 前 8 个参数 -> 寄存器 a0-a7
+                let target_reg = format!("a{}", i);
+                if val_reg != target_reg {
+                    writeln!(self.output, "  mv    {}, {}", target_reg, val_reg).unwrap();
+                    // 注意：mv 到了 aX 后，aX 可能会被后续参数的计算覆盖
+                    // 如果你的 get_reg 可能会用到 aX，这里就有冲突风险。
+                    // 全栈策略+SpillAll 可以规避这个问题，因为 get_reg 会 reload 到 tX。
+                }
+            } else {
+                // 后续参数 -> 栈 (0(sp), 4(sp)...)
+                let offset = (i - 8) * 4;
+                writeln!(self.output, "  sw    {}, {}(sp)", val_reg, offset).unwrap();
+            }
+        }
+
+        // 3. 生成 Call 指令
+        let callee_name = &self.program.func(call.callee()).name()[1..];
+        writeln!(self.output, "  call  {}", callee_name).unwrap();
+
+        // 4. 处理返回值
+        if !dfg.value(inst_val).ty().is_unit() {
+            // 此时返回值在 a0
+            // 我们需要把它"接管"过来，分配一个寄存器存起来 (标记为 dirty)
+            let dest_reg = self
+                .ctx
+                .as_mut()
+                .unwrap()
+                .alloc_reg_for_result(inst_val, &mut self.output);
+
+            if dest_reg != "a0" {
+                writeln!(self.output, "  mv    {}, a0", dest_reg).unwrap();
+            }
+        }
     }
 }

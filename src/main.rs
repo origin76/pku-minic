@@ -42,7 +42,7 @@ fn main() -> Result<()> {
 
     if flag == "-riscv" {
         // Generate assembly
-        let mut builder = AsmBuilder::new();
+        let mut builder = AsmBuilder::new(&program);
         builder.generate_program(&program);
         let mut file = File::create(output)?;
         file.write_all(builder.output.as_bytes())?;

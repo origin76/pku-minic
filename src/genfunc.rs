@@ -23,7 +23,7 @@ impl<'a> FunctionGenerator<'a> {
         Self {
             func,
             current_bb: None,
-            // [修改] 使用传入的符号表 (其中已经包含了所有函数的声明)
+            // 使用传入的符号表 (其中已经包含了所有函数的声明)
             symbol_table: global_symbols, 
             name_counter: 1,
             loop_stack: Vec::new(),
