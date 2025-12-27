@@ -3,6 +3,7 @@ pub mod genfunc;
 pub mod constval;
 pub mod decl;
 pub mod varval;
+pub mod flatten;
 
 pub use gen::*;
 pub use genfunc::*;

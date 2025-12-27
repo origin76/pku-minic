@@ -4,6 +4,24 @@ use crate::{
     parser::ast::*, ir_generation::genfunc::FunctionGenerator, analysis::scope::{Symbol, SymbolTable}
 };
 
+pub fn flatten_const_init_val(init: &ConstInitVal, symbol_table: &mut SymbolTable) -> Vec<i32> {
+    let mut values = Vec::new();
+    match init {
+        // 遇到基本数值：计算并加入列表
+        ConstInitVal::Exp(exp) => {
+            let val = evaluate_const_exp(&symbol_table,exp);
+            values.push(val);
+        }
+        // 遇到列表：递归处理每个子项
+        ConstInitVal::List(list) => {
+            for item in list {
+                values.extend(flatten_const_init_val(item, symbol_table));
+            }
+        }
+    }
+    values
+}
+
 impl<'a> FunctionGenerator<'a> {
     pub fn generate_decl(&mut self, decl: &Decl) {
         match decl {
@@ -12,22 +30,58 @@ impl<'a> FunctionGenerator<'a> {
         }
     }
 
-    fn generate_const_decl(&mut self,const_decl: &ConstDecl) {
+    fn generate_const_decl(&mut self, const_decl: &ConstDecl) {
         for def in &const_decl.defs {
-            // 1. 计算初始化表达式的值
-            // 注意：SysY 规定 const 初始化必须是编译期常量
-            // 这里为了演示，我们假设你有一个辅助函数能计算 Exp -> i32
-            // 如果你暂时做不到复杂的折叠，至少先支持 Exp::Number
-            let val = evaluate_const_exp(&mut self.symbol_table,&def.init);
+            // 1. 计算数组维度 (如果是标量，dims 为空)
+            // 比如 a[2][3]，dims = [2, 3]
+            let mut shape = Vec::new();
+            for dim_exp in &def.dims {
+                let dim_val = evaluate_const_exp(&self.symbol_table,&dim_exp);
+                if dim_val < 0 {
+                    panic!("Array dimension must be non-negative: {}", def.ident);
+                }
+                shape.push(dim_val as usize);
+            }
 
-            // 2. 存入符号表
-            self.symbol_table.insert_const(def.ident.clone(), val);
+            // 2. 根据是标量还是数组进行分流
+            if shape.is_empty() {
+                // === 情况 A: 标量 const int a = 1; ===
+                if let ConstInitVal::Exp(init_exp) = &def.init {
+                    let val = evaluate_const_exp(&self.symbol_table,init_exp);
+                    self.symbol_table.insert_const(def.ident.clone(), val);
+                } else {
+                    panic!("Scalar variable cannot be initialized with a list");
+                }
+            } else {
+                // === 情况 B: 数组 const int a[2] = {1, 2}; ===
+                
+                // 2.1 计算数组总大小 (Total Size)
+                // 例如 [2][3] -> 总大小 6
+                let total_len: usize = shape.iter().product();
+
+                // 2.2 展平初始化列表
+                // {1, {2, 3}} -> vec![1, 2, 3]
+                let mut values = flatten_const_init_val(&def.init, &mut self.symbol_table);
+
+                // 2.3 零填充 (Zero Padding)
+                // SysY 规定：如果初始化列表元素少于数组长度，后面补 0
+                // const int a[5] = {1, 2}; -> [1, 2, 0, 0, 0]
+                if values.len() > total_len {
+                    panic!("Too many initializers for constant array {}", def.ident);
+                }
+                // 使用 resize 自动补 0
+                values.resize(total_len, 0);
+
+                // 2.4 存入符号表
+                // 这里存的是纯数据，不涉及 IR 指令，因为这是 const
+                self.symbol_table.insert_const_array(def.ident.clone(), values);
+            }
         }
     }
 }
 
 // 辅助：计算编译期常量值 (简单版)
-pub fn evaluate_const_exp(sym: &mut SymbolTable, exp: &Exp) -> i32 {
+pub fn evaluate_const_exp(sym: &SymbolTable, exp: &Exp) -> i32 {
     match exp {
         // 1. 基础表达式：数字、括号、查表
         Exp::PrimaryExp(p) => match &**p {

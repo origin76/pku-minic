@@ -5,6 +5,7 @@ use koopa::ir::{Value,Function};
 pub enum Symbol {
     // 对于 const int a = 10; 我们直接记录它的整数值
     Const(i32),
+    ConstArray(Vec<i32>), 
     // 对于 int a = 10; 我们记录它在 Koopa IR 中的内存地址 (Alloc 指令的返回值)
     Var(Value), 
     Func(Function),
@@ -51,6 +52,12 @@ impl SymbolTable {
     pub fn insert_func(&mut self, name: String, func: Function) {
         if let Some(scope) = self.scopes.first_mut() {
             scope.insert(name, Symbol::Func(func));
+        }
+    }
+
+    pub fn insert_const_array(&mut self, name: String, vals: Vec<i32>) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name, Symbol::ConstArray(vals));
         }
     }
 

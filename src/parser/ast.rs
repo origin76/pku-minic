@@ -59,7 +59,14 @@ pub struct VarDef {
     pub ident: String,
     // 变量初始化是可选的 (int a;)
     // 并且初始化值是在运行时计算的 (int a = b + 1;)，所以是 Exp
-    pub init: Option<Box<Exp>>, 
+    pub dims: Vec<Box<Exp>>,
+    pub init: Option<InitVal>, 
+}
+
+#[derive(Debug, Clone)]
+pub enum InitVal {
+    Exp(Box<Exp>),
+    List(Vec<InitVal>), // [新增] {a, b+1, c}
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +80,14 @@ pub struct ConstDef {
     pub ident: String,
     // 文法中 ConstInitVal ::= ConstExp，而 ConstExp 就是 Exp
     // 所以这里直接存 Exp 即可
-    pub init: Box<Exp>, 
+    pub dims: Vec<Box<Exp>>,
+    pub init: ConstInitVal, 
+}
+
+#[derive(Debug, Clone)]
+pub enum ConstInitVal {
+    Exp(Box<Exp>),
+    List(Vec<ConstInitVal>), // [新增] {1, 2, 3}
 }
 
 // === 语句 (Stmt) ===
@@ -112,7 +126,7 @@ pub enum PrimaryExp {
 #[derive(Debug, Clone)]
 pub struct LVal {
     pub ident: String,
-    // pub indices: Vec<Exp>, // 未来支持数组 a[1][2]
+    pub indices: Vec<Box<Exp>>,
 }
 
 #[derive(Debug,Clone)]

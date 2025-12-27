@@ -81,13 +81,19 @@ VarDecl: VarDecl = {
     }
 }
 
-// 变量定义规则
-// VarDef ::= IDENT | IDENT "=" InitVal;
+// VarDef ::= IDENT {"[" ConstExp "]"} ["=" InitVal];
 VarDef: VarDef = {
-    <id:Ident> <init:("=" <Exp>)?> => VarDef {
+    <id:Ident> <dims:("[" <ConstExp> "]")*> <init:("=" <InitVal>)?> => VarDef {
         ident: id,
-        init: init, // init 是 Option<Box<Exp>>
+        dims: dims,
+        init: init,
     }
+}
+
+// InitVal ::= Exp | "{" [InitVal {"," InitVal}] "}";
+InitVal: InitVal = {
+    <e:Exp> => InitVal::Exp(e),
+    "{" <args:Comma<InitVal>> "}" => InitVal::List(args),
 }
 
 ConstDecl: ConstDecl = {
@@ -97,16 +103,18 @@ ConstDecl: ConstDecl = {
     }
 }
 
-// ConstDef ::= IDENT "=" ConstInitVal;
 ConstDef: ConstDef = {
-    <id:Ident> "=" <v:ConstInitVal> => ConstDef {
+    <id:Ident> <dims:("[" <ConstExp> "]")*> "=" <init:ConstInitVal> => ConstDef {
         ident: id,
-        init: v,
+        dims: dims,
+        init: init,
     }
 }
 
-// ConstInitVal ::= ConstExp;
-ConstInitVal: Box<Exp> = ConstExp;
+ConstInitVal: ConstInitVal = {
+    <e:ConstExp> => ConstInitVal::Exp(e),
+    "{" <args:Comma<ConstInitVal>> "}" => ConstInitVal::List(args),
+}
 
 // ConstExp ::= Exp;
 ConstExp: Box<Exp> = Exp;
@@ -251,11 +259,13 @@ PrimaryExp: Box<PrimaryExp> = {
     <n:Number> => Box::new(PrimaryExp::Number(n)), // 匹配数字
 }
 
-// LVal ::= IDENT;
+// LVal ::= IDENT {"[" Exp "]"};
 LVal: LVal = {
-    <id:Ident> => LVal { ident: id }
+    <id:Ident> <indices:("[" <Exp> "]")*> => LVal {
+        ident: id,
+        indices: indices,
+    }
 }
-
 
 UnaryOp: UnaryOp = {
   "+" => UnaryOp::Plus,

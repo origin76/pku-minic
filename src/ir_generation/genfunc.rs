@@ -1,11 +1,10 @@
 use koopa::ir::{
-    builder::{BasicBlockBuilder, LocalInstBuilder, ValueBuilder},
-    BasicBlock, BinaryOp, FunctionData, Type, Value, ValueKind,
+    BasicBlock, BinaryOp, FunctionData, Type, TypeKind, Value, ValueKind, builder::{BasicBlockBuilder, LocalInstBuilder, ValueBuilder}
 };
 
 use crate::{
-    parser::ast::{Block, BlockItem, Exp, PrimaryExp, Stmt, UnaryOp},
     analysis::scope::{Symbol, SymbolTable},
+    parser::ast::{Block, BlockItem, Exp, PrimaryExp, Stmt, UnaryOp},
 };
 
 pub struct FunctionGenerator<'a> {
@@ -19,12 +18,12 @@ pub struct FunctionGenerator<'a> {
 }
 
 impl<'a> FunctionGenerator<'a> {
-     pub fn new(func: &'a mut FunctionData, global_symbols: SymbolTable) -> Self {
+    pub fn new(func: &'a mut FunctionData, global_symbols: SymbolTable) -> Self {
         Self {
             func,
             current_bb: None,
             // 使用传入的符号表 (其中已经包含了所有函数的声明)
-            symbol_table: global_symbols, 
+            symbol_table: global_symbols,
             name_counter: 1,
             loop_stack: Vec::new(),
         }
@@ -177,25 +176,38 @@ impl<'a> FunctionGenerator<'a> {
             // 括号：(Exp) -> 重新调用 generate_exp
             PrimaryExp::Parentheses(exp) => self.generate_exp(exp),
 
+            // 1. 查表
             PrimaryExp::LVal(lval) => {
-                // 1. 查表
-                match self.symbol_table.lookup(&lval.ident) {
-                    Some(Symbol::Const(val)) => {
-                        // 2. 如果是常量，直接把整数值转换成 Koopa 的 Integer Value
-                        self.func.dfg_mut().new_value().integer(*val)
-                    }
-                    Some(Symbol::Var(ptr)) => {
-                        let load = self.func.dfg_mut().new_value().load(*ptr);
-                        self.add_inst(load);
-                        load
-                    }
-                    Some(Symbol::Func(_)) => {
-                        panic!("function is not lval");
-                    }
-                    None => {
-                        panic!("Undefined variable: {}", lval.ident);
+                // 1. 尝试查找常量 (如果是 const int a = 5)
+                if lval.indices.is_empty() {
+                    if let Some(Symbol::Const(v)) = self.symbol_table.lookup(&lval.ident) {
+                        return self.func.dfg_mut().new_value().integer(*v);
                     }
                 }
+
+                // 2. 计算地址并 Load
+                // 注意：如果是数组名作为参数传递 (return a)，这里逻辑不同 (需要 getelemptr 0)
+                // 但 Lv9.1 是一维数组基础，先假设都是取元素
+                let ptr = self.generate_lval_address(lval);
+
+                // 检查 ptr 指向的是不是 i32
+                // 如果指向的是数组(比如 a 是 [i32, 10]*，且没有索引)，则需要降级为指针 (getelemptr 0)
+                // SysY 中数组名做右值表示首地址
+                let ptr_ty = self.func.dfg().value(ptr).ty();
+                if let TypeKind::Pointer(base) = ptr_ty.kind() {
+                    if matches!(base.kind(),TypeKind::Array(_,_ )) {
+                        // 数组退化为指针: getelemptr ptr, 0
+                        let zero = self.func.dfg_mut().new_value().integer(0);
+                        let decay = self.func.dfg_mut().new_value().get_elem_ptr(ptr, zero);
+                        self.add_inst(decay);
+                        return decay;
+                    }
+                }
+
+                // 普通变量读取
+                let load = self.func.dfg_mut().new_value().load(ptr);
+                self.add_inst(load);
+                load
             }
         }
     }
