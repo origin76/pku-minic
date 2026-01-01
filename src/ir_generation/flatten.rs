@@ -1,86 +1,90 @@
-use crate::{InitVal, SymbolTable, evaluate_const_exp};
+use koopa::ir::{Value, builder::{LocalInstBuilder, ValueBuilder}};
 
-/// 上下文，用于递归展平
-struct InitData<'a> {
-    current_idx: usize, // 当前填充到了哪个位置
-    values: Vec<i32>,   // 最终展平的数据
-    dims: &'a [usize],  // 数组维度定义
-}
-
-impl<'a> InitData<'a> {
-    fn new(dims: &'a [usize]) -> Self {
-        // 计算总容量
-        let total_size = dims.iter().product();
-        Self {
-            current_idx: 0,
-            values: vec![0; total_size], // 预先填充 0
-            dims,
-        }
-    }
-
-    /// 核心递归函数
-    /// init: 当前处理的初始化节点
-    /// dim_depth: 当前处于第几维 (0 表示最外层)
-    fn fill(&mut self, init: &InitVal, dim_depth: usize, symbol_table: &SymbolTable) {
-        match init {
-            // 情况 1: 遇到单个数值 (Exp)
-            InitVal::Exp(exp) => {
-                // 计算常量值
-                let val = evaluate_const_exp(symbol_table,exp);
-                // 填入当前位置
-                if self.current_idx < self.values.len() {
-                    self.values[self.current_idx] = val;
-                    self.current_idx += 1;
-                }
-            }
-            // 情况 2: 遇到列表 (List) "{...}"
-            InitVal::List(list) => {
-                // 计算当前维度一个元素（可能是子数组）占多大空间
-                // 例如 a[2][3][4], depth=0 (对应[2]), 它的一个元素是 [3][4], size=12
-                let sub_size: usize = self.dims.iter().skip(dim_depth + 1).product();
-                
-                // 对齐边界：如果是嵌套的大括号，通常意味着开始填充一个新的子块
-                // 此时如果不处于边界，可能需要padding (SysY语义较松，这里简化处理，直接挨个填)
-                
-                for item in list {
-                    // 递归填充，深度+1
-                    // 注意：如果 item 还是 List，它会匹配到 List 分支
-                    // 如果 item 是 Exp，它会匹配到 Exp 分支
-                    // 这里有一个 corner case: int a[2][2] = {1, {2, 3}}
-                    // 1 是 Exp, {2, 3} 是 List
-                    
-                    // 如果遇到显式的花括号，我们需要检查对齐
-                    if let InitVal::List(_) = item {
-                        // 找到下一个对齐 sub_size 的位置
-                        // (这里是为了处理 {1, {2}} 这种混合情况，1占了位置，{2}应该从下一个大块开始吗？
-                        //  SysY 规范里 {1, {2}} 对 int a[2][2] 意味着 a[0][0]=1, a[1][0]=2)
-                        //  简单起见，我们暂且认为 List 总是对应下一级维度
-                        self.fill(item, dim_depth + 1, symbol_table);
-                    } else {
-                        // 标量直接填
-                        self.fill(item, dim_depth, symbol_table);
-                    }
-                }
-                
-                // 处理完一个 {} 后，需要对齐到当前块的结束吗？
-                // 比如 a[4] = {1, 2}，后面两个补0。
-                // 我们的 values 已经预填了 0，只要 current_idx 指针正确移动即可。
-                // 在多维数组中，显式的 {} 通常意味着填满当前的子维度。
-                // 严格的 C 语义比较复杂，但在 SysY 中，通常可以直接顺序填充。
-                
-                // 简易策略：如果遇到显式 List，我们假设它是为了初始化某一层级的维度结构。
-                // 实际上对于大作业，大多数测试用例是 fully braced 或者 fully flat。
-                // 只要保证 current_idx 递增，预填的 0 会自动生效。
-            }
-        }
-    }
-}
+use crate::{ConstInitVal, Exp, FunctionGenerator, InitVal, SymbolTable, evaluate_const_exp};
 
 // 对外接口
-fn flatten_init_val(init: &Option<InitVal>, dims: &[usize], symbol_table: &SymbolTable) -> Vec<i32> {
-    let mut data = InitData::new(dims);
-    if let Some(init_val) = init {
-        data.fill(init_val, 0, symbol_table);
+pub(crate) fn flatten_init_val(init: &InitVal) -> Vec<Exp> {
+    let mut values = Vec::new();
+    match init {
+        InitVal::Exp(exp) => {
+            values.push(*exp.clone());
+        }
+        InitVal::List(list) => {
+            for item in list {
+                values.extend(flatten_init_val(item));
+            }
+        }
     }
-    data.values
+    values
+}
+pub fn flatten_const_init_val(init: &ConstInitVal, symbol_table: &SymbolTable) -> Vec<i32> {
+    let mut values = Vec::new();
+    match init {
+        ConstInitVal::Exp(exp) => {
+            // 必须是常量，立即求值
+            values.push(evaluate_const_exp(symbol_table,exp));
+        }
+        ConstInitVal::List(list) => {
+            for item in list {
+                values.extend(flatten_const_init_val(item, symbol_table));
+            }
+        }
+    }
+    values
+}
+
+pub fn flatten_global_init_val(init: &InitVal, symbol_table: &SymbolTable) -> Vec<i32> {
+    let mut values = Vec::new();
+    match init {
+        InitVal::Exp(exp) => {
+            values.push(evaluate_const_exp( symbol_table,exp));
+        }
+        InitVal::List(list) => {
+            for item in list {
+                values.extend(flatten_global_init_val(item, symbol_table));
+            }
+        }
+    }
+    values
+}
+
+
+impl<'a> FunctionGenerator<'a> {
+    /// 给定基地址和维度，计算线性索引 i 对应的元素指针
+    /// 例如 a[2][3], index=4 (即 a[1][1]) -> getelemptr(getelemptr(a, 1), 1)
+    pub fn get_elem_ptr_by_flat_index(&mut self, base_ptr: Value, flat_index: usize, dims: &[usize]) -> Value {
+        let mut ptr = base_ptr;
+        let mut current_idx = flat_index;
+        
+        // 我们需要计算每一维的 stride (跨度)
+        // 例如 a[2][3][4]，dims=[2, 3, 4]
+        // 第 0 维 stride = 3 * 4 = 12
+        // 第 1 维 stride = 4
+        // 第 2 维 stride = 1
+        
+        // 技巧：我们可以临时计算每一层的 stride
+        // 或者更简单：我们知道总大小，然后除以当前维度的后继维度积
+        
+        // 让我们从第一维开始剥离
+        for (i, &dim_len) in dims.iter().enumerate() {
+            // 计算当前维度之后的容量 (sub_size)
+            let sub_size: usize = dims[i+1..].iter().product(); 
+            // 如果是最后一维，sub_size 就是 1
+            
+            // 当前维度的下标 = current_idx / sub_size
+            let dim_idx = current_idx / sub_size;
+            
+            // 更新 current_idx 为剩余的偏移量
+            current_idx = current_idx % sub_size;
+            
+            // 生成 getelemptr
+            let idx_val = self.func.dfg_mut().new_value().integer(dim_idx as i32);
+            let next_ptr = self.func.dfg_mut().new_value().get_elem_ptr(ptr, idx_val);
+            self.add_inst(next_ptr);
+            
+            ptr = next_ptr;
+        }
+        
+        ptr
+    }
 }

@@ -1,17 +1,17 @@
 use koopa::ir::{builder::*, Type, TypeKind, Value};
 
 use crate::{
-    InitVal, analysis::scope::Symbol, evaluate_const_exp, ir_generation::genfunc::FunctionGenerator, parser::ast::{Exp, LVal, VarDecl}
+    InitVal, analysis::scope::Symbol, build_array_type, evaluate_const_exp, flatten::flatten_init_val, ir_generation::genfunc::FunctionGenerator, parser::ast::{Exp, LVal, VarDecl}
 };
 
 impl<'a> FunctionGenerator<'a> {
     // 辅助：在 Entry Block 分配局部变量
-    pub fn alloc_variable(&mut self) -> Value {
+    pub fn alloc_variable(&mut self, ty: Type) -> Value {
         // 1. 获取 Entry Block
         let entry_bb = self.func.layout().entry_bb().unwrap();
 
         // 2. 创建 alloc 指令 (分配 i32)
-        let alloc = self.func.dfg_mut().new_value().alloc(Type::get_i32());
+        let alloc = self.func.dfg_mut().new_value().alloc(ty);
 
         // 3. 将 alloc 指令插入到 Entry Block 的【最前面】
         // 这样可以确保它在任何使用之前都有效
@@ -24,77 +24,64 @@ impl<'a> FunctionGenerator<'a> {
 
         alloc
     }
-
-    pub fn generate_var_decl(&mut self, decl: &VarDecl) {  
+    pub fn generate_var_decl(&mut self, decl: &VarDecl) {
         for def in &decl.defs {
-            // 1. 计算维度 (const exp)
-            let mut dims = Vec::new();
-            for d in &def.dims {
-                dims.push(evaluate_const_exp(&mut self.symbol_table,d) as usize);
-            }
+            // 1. 计算维度
+            let dims: Vec<usize> = def
+                .dims
+                .iter()
+                .map(|d| evaluate_const_exp(&self.symbol_table,d) as usize)
+                .collect();
 
-            // 2. 构造类型 & Alloc
-            let ty = if dims.is_empty() {
-                koopa::ir::Type::get_i32()
-            } else {
-                // 目前只处理 1D: [i32, N]
-                koopa::ir::Type::get_array(koopa::ir::Type::get_i32(), dims[0])
-            };
-            
-            let alloc = self.func.dfg_mut().new_value().alloc(ty);
+            // 2. 分配内存 (alloc)
+            let ty = build_array_type(&dims);
+            let alloc_ptr = self.alloc_variable(ty);
 
-            // Move alloc to entry block
-            let entry_bb = self.func.layout().entry_bb().unwrap();
-            let _ = self
-                .func
-                .layout_mut()
-                .bb_mut(entry_bb)
-                .insts_mut()
-                .push_key_front(alloc);
+            // 3. 注册符号表
+            self.symbol_table.insert_var(def.ident.clone(), alloc_ptr);
 
-            // 注册到符号表
-            self.symbol_table.insert_var(def.ident.clone(), alloc);
-
-            // 3. 处理初始化
+            // 4. 处理初始化
             if let Some(init) = &def.init {
                 if dims.is_empty() {
-                    // 标量初始化
+                    // === 情况 A: 标量初始化 ===
+                    // int a = 1;
                     if let InitVal::Exp(e) = init {
                         let val = self.generate_exp(e);
-                        let store = self.func.dfg_mut().new_value().store(val, alloc);
+                        let store = self.func.dfg_mut().new_value().store(val, alloc_ptr);
                         self.add_inst(store);
                     }
                 } else {
-                    // 数组初始化
-                    // 将 InitVal 展平或遍历
-                    if let InitVal::List(list) = init {
-                        for (i, item) in list.iter().enumerate() {
-                            if i >= dims[0] { break; } // 防止越界
-                            
-                            if let InitVal::Exp(e) = item {
-                                // 算出要存的值
-                                let val = self.generate_exp(e);
-                                
-                                // 算出目标地址: getelemptr alloc, i
-                                let idx = self.func.dfg_mut().new_value().integer(i as i32);
-                                let elem_ptr = self.func.dfg_mut().new_value().get_elem_ptr(alloc, idx);
-                                self.add_inst(elem_ptr);
-                                
-                                // store
-                                let store = self.func.dfg_mut().new_value().store(val, elem_ptr);
-                                self.add_inst(store);
-                            }
-                        }
-                        // 剩余未初始化的元素默认为 0 (SysY 规范)
-                        // Simple implementation: continue loop until dims[0], fill with 0
-                        for i in list.len()..dims[0] {
-                            let val = self.func.dfg_mut().new_value().integer(0);
-                            let idx = self.func.dfg_mut().new_value().integer(i as i32);
-                            let elem_ptr = self.func.dfg_mut().new_value().get_elem_ptr(alloc, idx);
-                            self.add_inst(elem_ptr);
-                            let store = self.func.dfg_mut().new_value().store(val, elem_ptr);
-                            self.add_inst(store);
-                        }
+                    // === 情况 B: 数组初始化 ===
+                    // int a[2][2] = {1, 2, 3};
+
+                    // 1. 计算总容量
+                    let total_len: usize = dims.iter().product();
+
+                    // 2. 展平初始化列表 (得到 Exp 列表)
+                    let flattened_exps = flatten_init_val(init);
+
+                    if flattened_exps.len() > total_len {
+                        panic!("Too many initializers for array {}", def.ident);
+                    }
+
+                    // 3. 遍历并生成 Store
+                    // i: 线性索引
+                    for i in 0..total_len {
+                        // 准备要存的值
+                        let val = if i < flattened_exps.len() {
+                            // 显式初始化的部分：计算表达式
+                            self.generate_exp(&flattened_exps[i])
+                        } else {
+                            // 未初始化的部分：补 0
+                            self.func.dfg_mut().new_value().integer(0)
+                        };
+
+                        // 计算目标地址 (getelemptr 链)
+                        let elem_ptr = self.get_elem_ptr_by_flat_index(alloc_ptr, i, &dims);
+
+                        // 生成 Store
+                        let store = self.func.dfg_mut().new_value().store(val, elem_ptr);
+                        self.add_inst(store);
                     }
                 }
             }
@@ -128,9 +115,7 @@ impl<'a> FunctionGenerator<'a> {
             match ptr_ty.kind() {
                 // 指针指向数组 (alloc [i32, 10] 返回的是 *[i32, 10])
                 // 使用 getelemptr
-                TypeKind::Pointer(base)
-                    if matches!(base.kind(), TypeKind::Array(_, _)) =>
-                {
+                TypeKind::Pointer(base) if matches!(base.kind(), TypeKind::Array(_, _)) => {
                     let elem_ptr = self.func.dfg_mut().new_value().get_elem_ptr(ptr, index_val);
                     self.add_inst(elem_ptr);
                     ptr = elem_ptr;

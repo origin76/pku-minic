@@ -1,7 +1,7 @@
-use koopa::ir::BinaryOp;
+use koopa::ir::{BinaryOp, builder::{LocalInstBuilder, ValueBuilder}};
 
 use crate::{
-    parser::ast::*, ir_generation::genfunc::FunctionGenerator, analysis::scope::{Symbol, SymbolTable}
+    analysis::scope::{Symbol, SymbolTable}, build_array_type, ir_generation::genfunc::FunctionGenerator, parser::ast::*
 };
 
 pub fn flatten_const_init_val(init: &ConstInitVal, symbol_table: &mut SymbolTable) -> Vec<i32> {
@@ -9,7 +9,7 @@ pub fn flatten_const_init_val(init: &ConstInitVal, symbol_table: &mut SymbolTabl
     match init {
         // 遇到基本数值：计算并加入列表
         ConstInitVal::Exp(exp) => {
-            let val = evaluate_const_exp(&symbol_table,exp);
+            let val = evaluate_const_exp(&symbol_table, exp);
             values.push(val);
         }
         // 遇到列表：递归处理每个子项
@@ -32,49 +32,53 @@ impl<'a> FunctionGenerator<'a> {
 
     fn generate_const_decl(&mut self, const_decl: &ConstDecl) {
         for def in &const_decl.defs {
-            // 1. 计算数组维度 (如果是标量，dims 为空)
-            // 比如 a[2][3]，dims = [2, 3]
-            let mut shape = Vec::new();
-            for dim_exp in &def.dims {
-                let dim_val = evaluate_const_exp(&self.symbol_table,&dim_exp);
-                if dim_val < 0 {
-                    panic!("Array dimension must be non-negative: {}", def.ident);
-                }
-                shape.push(dim_val as usize);
-            }
+            // 1. 计算维度
+            let dims: Vec<usize> = def
+                .dims
+                .iter()
+                .map(|d| evaluate_const_exp(&self.symbol_table,d) as usize)
+                .collect();
 
-            // 2. 根据是标量还是数组进行分流
-            if shape.is_empty() {
-                // === 情况 A: 标量 const int a = 1; ===
+            if dims.is_empty() {
+                // === 情况 A: 标量常量 ===
                 if let ConstInitVal::Exp(init_exp) = &def.init {
                     let val = evaluate_const_exp(&self.symbol_table,init_exp);
+                    // 仅存入符号表，供常量折叠使用
                     self.symbol_table.insert_const(def.ident.clone(), val);
-                } else {
-                    panic!("Scalar variable cannot be initialized with a list");
                 }
             } else {
-                // === 情况 B: 数组 const int a[2] = {1, 2}; ===
-                
-                // 2.1 计算数组总大小 (Total Size)
-                // 例如 [2][3] -> 总大小 6
-                let total_len: usize = shape.iter().product();
+                // === 情况 B: 数组常量 ===
+                let total_len: usize = dims.iter().product();
 
-                // 2.2 展平初始化列表
-                // {1, {2, 3}} -> vec![1, 2, 3]
+                // 1. 展平并求值数据
                 let mut values = flatten_const_init_val(&def.init, &mut self.symbol_table);
 
-                // 2.3 零填充 (Zero Padding)
-                // SysY 规定：如果初始化列表元素少于数组长度，后面补 0
-                // const int a[5] = {1, 2}; -> [1, 2, 0, 0, 0]
+                // 2. 补零 (SysY 规范)
                 if values.len() > total_len {
-                    panic!("Too many initializers for constant array {}", def.ident);
+                    panic!("Too many initializers for const array {}", def.ident);
                 }
-                // 使用 resize 自动补 0
                 values.resize(total_len, 0);
 
-                // 2.4 存入符号表
-                // 这里存的是纯数据，不涉及 IR 指令，因为这是 const
-                self.symbol_table.insert_const_array(def.ident.clone(), values);
+                // 3. 【关键】双重注册
+                // (1) 存入 ConstArray，用于编译期常量折叠 (如 b = a[0] + 1 -> b = 2)
+                self.symbol_table
+                    .insert_const_array(def.ident.clone(), values.clone());
+
+                // (2) 在栈上 Alloc 并 Store，用于运行时访问 (如 b = a[k])
+                // 因为我们无法预知用户是否只用常量索引访问数组，所以必须分配内存
+                let ty = build_array_type(&dims);
+                let alloc = self.alloc_variable(ty);
+
+                // 注册 alloc 指针，以便 generate_lval_address 能找到它
+                self.symbol_table.insert_var(def.ident.clone(), alloc);
+
+                // 生成 Store 指令初始化栈上内存
+                for (i, &val) in values.iter().enumerate() {
+                    let val_v = self.func.dfg_mut().new_value().integer(val);
+                    let ptr = self.get_elem_ptr_by_flat_index(alloc, i, &dims);
+                    let store = self.func.dfg_mut().new_value().store(val_v, ptr);
+                    self.add_inst(store);
+                }
             }
         }
     }

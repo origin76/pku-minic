@@ -89,7 +89,7 @@ fn generate_single_function(func_def: &FuncDef, program: &mut Program, symbol_ta
         // 使用你现有的 alloc_variable 或 process_alloc 逻辑
         // 这里假设你封装了一个 alloc_stack_variable
         // 它会在 entry block 插入 alloc 指令，并返回该指针 Value
-        let alloc_ptr = gen.alloc_variable();
+        let alloc_ptr = gen.alloc_variable(IrType::get_i32());
 
         // 2. 将参数值存入该空间 (Store)
         let store = gen.func.dfg_mut().new_value().store(*arg_val, alloc_ptr);
