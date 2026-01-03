@@ -4,7 +4,7 @@ use koopa::ir::{
 };
 
 use crate::{
-    ConstInitVal, InitVal, analysis::scope::SymbolTable, flatten::flatten_init_val, flatten_const_init_val, ir_generation::constval::evaluate_const_exp, parser::ast::Decl
+    ConstInitVal, InitVal, analysis::scope::SymbolTable, flatten_const_init_val, ir_generation::constval::evaluate_const_exp, parser::ast::Decl
 };
 
 use koopa::ir::{Type, Value};
@@ -24,28 +24,6 @@ fn flatten_global_init_val(init: &InitVal, symbol_table: &SymbolTable) -> Vec<i3
         }
     }
     values
-}
-
-/// 辅助：递归构建 Koopa 的 Aggregate Value 或 Integer Value
-/// data: 扁平化的数据 (例如 [1, 2, 3, 4])
-/// dims: 维度信息 (例如 [2, 2] 表示 int a[2][2])
-fn build_global_init_value(program: &mut Program, data: &[i32], dims: &[usize]) -> Value {
-   if dims.is_empty() {
-        return program.new_value().integer(data[0]);
-    }
-
-    let current_dim_len = dims[0];
-    let remaining_dims = &dims[1..];
-    let stride = remaining_dims.iter().product::<usize>().max(1);
-
-    let mut agg_elems = Vec::new();
-    for i in 0..current_dim_len {
-        let start = i * stride;
-        let sub_data = &data[start..start + stride];
-        agg_elems.push(build_global_init_value(program, sub_data, remaining_dims));
-    }
-
-    program.new_value().aggregate(agg_elems)
 }
 
 /// 辅助：根据维度生成 Koopa 数组类型
@@ -124,14 +102,14 @@ pub fn process_global_decl(program: &mut Program, symbol_table: &mut SymbolTable
                     symbol_table.insert_const_array(def.ident.clone(), values.clone());
 
                     // (B) 创建 Global Alloc 用于运行时地址访问 (f(a) 或 a[var])
-                    let ty = build_array_type(&dims);
                     let init_val = build_global_aggregate(program, &values, &dims);
                     
                     let global_alloc = program.new_value().global_alloc(init_val);
+                    let ptr_type = program.borrow_value(global_alloc).ty().clone(); 
                     program.set_value_name(global_alloc, Some(format!("@{}", def.ident)));
                     
                     // 注册为 Var (指针)
-                    symbol_table.insert_var(def.ident.clone(), global_alloc);
+                    symbol_table.insert_var(def.ident.clone(), global_alloc,ptr_type);
                 }
             }
         }
@@ -187,12 +165,13 @@ pub fn process_global_decl(program: &mut Program, symbol_table: &mut SymbolTable
 
                 // 3. 创建 Global Alloc 指令
                 let global_alloc = program.new_value().global_alloc(init_value);
+                let ptr_type = program.borrow_value(global_alloc).ty().clone();
                 
                 // 4. 设置名字
                 program.set_value_name(global_alloc, Some(format!("@{}", def.ident)));
 
                 // 5. 注册到符号表 (存的是指针 Value)
-                symbol_table.insert_var(def.ident.clone(), global_alloc);
+                symbol_table.insert_var(def.ident.clone(), global_alloc,ptr_type);
             }
         }
     }

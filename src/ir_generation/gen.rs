@@ -90,6 +90,7 @@ fn generate_single_function(func_def: &FuncDef, program: &mut Program, symbol_ta
         // 这里假设你封装了一个 alloc_stack_variable
         // 它会在 entry block 插入 alloc 指令，并返回该指针 Value
         let alloc_ptr = gen.alloc_variable(IrType::get_i32());
+        let ptr_type = gen.func.dfg().value(alloc_ptr).ty().clone(); // 得到 *i32
 
         // 2. 将参数值存入该空间 (Store)
         let store = gen.func.dfg_mut().new_value().store(*arg_val, alloc_ptr);
@@ -98,7 +99,7 @@ fn generate_single_function(func_def: &FuncDef, program: &mut Program, symbol_ta
         // 3. 将参数名注册到当前函数的局部符号表
         // 以后在函数体内用到 param_ast.ident 时，查到的就是 alloc_ptr
         gen.symbol_table
-            .insert_var(param_ast.ident.clone(), alloc_ptr);
+            .insert_var(param_ast.ident.clone(), alloc_ptr,ptr_type);
     }
 
     // F. 生成函数体 Block

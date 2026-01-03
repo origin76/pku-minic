@@ -66,7 +66,7 @@ impl<'a> FunctionGenerator<'a> {
         // 或者更简单：我们知道总大小，然后除以当前维度的后继维度积
         
         // 让我们从第一维开始剥离
-        for (i, &dim_len) in dims.iter().enumerate() {
+        for (i, _) in dims.iter().enumerate() {
             // 计算当前维度之后的容量 (sub_size)
             let sub_size: usize = dims[i+1..].iter().product(); 
             // 如果是最后一维，sub_size 就是 1

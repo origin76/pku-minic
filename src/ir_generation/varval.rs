@@ -35,10 +35,10 @@ impl<'a> FunctionGenerator<'a> {
 
             // 2. 分配内存 (alloc)
             let ty = build_array_type(&dims);
-            let alloc_ptr = self.alloc_variable(ty);
+            let alloc_ptr = self.alloc_variable(ty.clone());
 
             // 3. 注册符号表
-            self.symbol_table.insert_var(def.ident.clone(), alloc_ptr);
+            self.symbol_table.insert_var(def.ident.clone(), alloc_ptr , ty);
 
             // 4. 处理初始化
             if let Some(init) = &def.init {
@@ -91,48 +91,51 @@ impl<'a> FunctionGenerator<'a> {
     pub fn generate_assign(&mut self, lval: &LVal, exp: &Exp) {
         let val = self.generate_exp(exp);
         // 使用新函数计算地址
-        let ptr = self.generate_lval_address(lval);
+        let (ptr , _ )= self.generate_lval_address(lval);
         let store = self.func.dfg_mut().new_value().store(val, ptr);
         self.add_inst(store);
     }
 
-    pub fn generate_lval_address(&mut self, lval: &LVal) -> Value {
-        // 1. 查找基地址
-        let mut ptr = match self.symbol_table.lookup(&lval.ident) {
-            Some(Symbol::Var(p)) => *p,
-            // 兼容之前只存 const 值的情况，如果 const 数组被作为右值使用，逻辑不同
-            // 但 LVal 出现在等号左边时，必须是 Var
+    pub fn generate_lval_address(&mut self, lval: &LVal) -> (Value, Type) {
+        // 1. 查表，同时获取 Value 和 Type
+        let (mut ptr, mut ptr_ty) = match self.symbol_table.lookup(&lval.ident) {
+            Some(Symbol::Var(v, t)) => (*v, t.clone()),
             _ => panic!("Undefined variable: {}", lval.ident),
         };
 
-        // 2. 逐层应用索引 (getelemptr / getptr)
-        for (_, index_exp) in lval.indices.iter().enumerate() {
+        // 2. 逐层应用索引
+        for index_exp in &lval.indices {
             let index_val = self.generate_exp(index_exp);
 
-            // 检查当前 ptr 的类型
-            let ptr_ty = self.func.dfg().value(ptr).ty();
-
             match ptr_ty.kind() {
-                // 指针指向数组 (alloc [i32, 10] 返回的是 *[i32, 10])
-                // 使用 getelemptr
-                TypeKind::Pointer(base) if matches!(base.kind(), TypeKind::Array(_, _)) => {
-                    let elem_ptr = self.func.dfg_mut().new_value().get_elem_ptr(ptr, index_val);
-                    self.add_inst(elem_ptr);
-                    ptr = elem_ptr;
+                // 指针指向数组 (*[T, N]) -> getelemptr -> 结果类型 *T
+                koopa::ir::TypeKind::Pointer(base) if matches!(base.kind() , TypeKind::Array(_,_ )) => {
+                    // 生成指令
+                    let next_ptr = self.func.dfg_mut().new_value().get_elem_ptr(ptr, index_val);
+                    self.add_inst(next_ptr);
+                    
+                    // 手动推导新类型: *[T, N] -> *T
+                    // base 是数组类型 [T, N]，我们需要它的元素类型 T，并包裹成指针 *T
+                    if let koopa::ir::TypeKind::Array(elem_ty, _) = base.kind() {
+                        ptr = next_ptr;
+                        ptr_ty = koopa::ir::Type::get_pointer(elem_ty.clone());
+                    } else { unreachable!() }
                 }
-
-                // 指针指向整数 (函数参数 int* a)
-                // 使用 getptr
-                TypeKind::Pointer(_) => {
-                    let new_ptr = self.func.dfg_mut().new_value().get_ptr(ptr, index_val);
-                    self.add_inst(new_ptr);
-                    ptr = new_ptr;
+                
+                // 指针指向整数 (*i32) -> getptr -> 结果类型 *i32
+                koopa::ir::TypeKind::Pointer(base) => {
+                    let next_ptr = self.func.dfg_mut().new_value().get_ptr(ptr, index_val);
+                    self.add_inst(next_ptr);
+                    
+                    // 类型不变: *i32 偏移后还是 *i32
+                    ptr = next_ptr;
+                    // ptr_ty 保持不变
                 }
-
-                _ => panic!("Cannot index into non-pointer type"),
+                
+                _ => panic!("Cannot index non-pointer type"),
             }
         }
 
-        ptr
+        (ptr, ptr_ty)
     }
 }

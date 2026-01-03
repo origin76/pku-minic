@@ -1,5 +1,6 @@
 use koopa::ir::{
-    BasicBlock, BinaryOp, FunctionData, Type, TypeKind, Value, ValueKind, builder::{BasicBlockBuilder, LocalInstBuilder, ValueBuilder}
+    builder::{BasicBlockBuilder, LocalInstBuilder, ValueBuilder},
+    BasicBlock, BinaryOp, FunctionData, Type, TypeKind, Value, ValueKind,
 };
 
 use crate::{
@@ -176,35 +177,30 @@ impl<'a> FunctionGenerator<'a> {
             // 括号：(Exp) -> 重新调用 generate_exp
             PrimaryExp::Parentheses(exp) => self.generate_exp(exp),
 
-            // 1. 查表
             PrimaryExp::LVal(lval) => {
-                // 1. 尝试查找常量 (如果是 const int a = 5)
+                // 1. 尝试查找常量 (const int a = 5)
                 if lval.indices.is_empty() {
                     if let Some(Symbol::Const(v)) = self.symbol_table.lookup(&lval.ident) {
                         return self.func.dfg_mut().new_value().integer(*v);
                     }
                 }
 
-                // 2. 计算地址并 Load
-                // 注意：如果是数组名作为参数传递 (return a)，这里逻辑不同 (需要 getelemptr 0)
-                // 但 Lv9.1 是一维数组基础，先假设都是取元素
-                let ptr = self.generate_lval_address(lval);
+                // 2. 计算地址，并获取类型
+                let (ptr, ptr_ty) = self.generate_lval_address(lval);
 
-                // 检查 ptr 指向的是不是 i32
-                // 如果指向的是数组(比如 a 是 [i32, 10]*，且没有索引)，则需要降级为指针 (getelemptr 0)
-                // SysY 中数组名做右值表示首地址
-                let ptr_ty = self.func.dfg().value(ptr).ty();
-                if let TypeKind::Pointer(base) = ptr_ty.kind() {
-                    if matches!(base.kind(),TypeKind::Array(_,_ )) {
-                        // 数组退化为指针: getelemptr ptr, 0
+                // 3. 检查是否需要数组退化
+                // 此时 ptr_ty 是我们一路手动推导出来的，绝对可靠
+                if let koopa::ir::TypeKind::Pointer(base) = ptr_ty.kind() {
+                    if matches!(base.kind() , TypeKind::Array(_,_ )) {
+                        // 数组名作为右值 -> getelemptr ptr, 0 (获取首地址)
                         let zero = self.func.dfg_mut().new_value().integer(0);
                         let decay = self.func.dfg_mut().new_value().get_elem_ptr(ptr, zero);
                         self.add_inst(decay);
-                        return decay;
+                        return decay; // 返回指针
                     }
                 }
 
-                // 普通变量读取
+                // 4. 普通变量读取 (加载值)
                 let load = self.func.dfg_mut().new_value().load(ptr);
                 self.add_inst(load);
                 load

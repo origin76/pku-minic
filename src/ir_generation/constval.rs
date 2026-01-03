@@ -67,10 +67,10 @@ impl<'a> FunctionGenerator<'a> {
                 // (2) 在栈上 Alloc 并 Store，用于运行时访问 (如 b = a[k])
                 // 因为我们无法预知用户是否只用常量索引访问数组，所以必须分配内存
                 let ty = build_array_type(&dims);
-                let alloc = self.alloc_variable(ty);
+                let alloc = self.alloc_variable(ty.clone());
 
                 // 注册 alloc 指针，以便 generate_lval_address 能找到它
-                self.symbol_table.insert_var(def.ident.clone(), alloc);
+                self.symbol_table.insert_var(def.ident.clone(), alloc , ty);
 
                 // 生成 Store 指令初始化栈上内存
                 for (i, &val) in values.iter().enumerate() {

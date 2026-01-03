@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use koopa::ir::{Value,Function};
+use koopa::ir::{Function, Type, Value};
 
 #[derive(Debug, Clone)]
 pub enum Symbol {
@@ -7,7 +7,7 @@ pub enum Symbol {
     Const(i32),
     ConstArray(Vec<i32>), 
     // 对于 int a = 10; 我们记录它在 Koopa IR 中的内存地址 (Alloc 指令的返回值)
-    Var(Value), 
+    Var(Value,Type), 
     Func(Function),
 }
 
@@ -43,9 +43,9 @@ impl SymbolTable {
         }
     }
 
-    pub fn insert_var(&mut self, name: String, ptr: Value) {
+    pub fn insert_var(&mut self, name: String, ptr: Value , ty : Type) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, Symbol::Var(ptr));
+            scope.insert(name, Symbol::Var(ptr,ty));
         }
     }
 
