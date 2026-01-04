@@ -22,6 +22,7 @@ pub struct FuncDef {
 pub struct FuncFParam {
     pub b_type: Type, // 目前只有 int
     pub ident: String,
+    pub dims: Vec<Box<Exp>>
     // 未来可能还有数组维度
 }
 

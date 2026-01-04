@@ -4,7 +4,7 @@ use koopa::ir::{
 };
 
 use crate::{
-    ConstInitVal, InitVal, analysis::scope::SymbolTable, flatten_const_init_val, ir_generation::constval::evaluate_const_exp, parser::ast::Decl
+    ConstInitVal, FuncFParam, InitVal, analysis::scope::SymbolTable, flatten_const_init_val, ir_generation::constval::evaluate_const_exp, parser::ast::Decl
 };
 
 use koopa::ir::{Type, Value};
@@ -34,6 +34,27 @@ pub fn build_array_type(dims: &[usize]) -> Type {
         ty = Type::get_array(ty, dim);
     }
     ty
+}
+
+pub fn build_param_type(param: &FuncFParam, symbol_table: &SymbolTable) -> Type {
+    // 1. 如果没有维度，就是普通 int
+    if param.dims.is_empty() {
+        return Type::get_i32();
+    }
+
+    // 2. 如果有维度，第一维在函数参数中是忽略的（或者是空的）
+    // 我们只需要处理剩下的维度
+    let remaining_dims = &param.dims[1..];
+    
+    // 构造基础数组类型 (Array Type)
+    let mut base_ty = Type::get_i32();
+    for dim_exp in remaining_dims.iter().rev() {
+        let dim_val = evaluate_const_exp( symbol_table,dim_exp) as usize;
+        base_ty = Type::get_array(base_ty, dim_val);
+    }
+
+    // 3. 最终类型是指向该数组的指针
+    Type::get_pointer(base_ty)
 }
 
 fn build_global_aggregate(program: &mut Program, data: &[i32], dims: &[usize]) -> Value {

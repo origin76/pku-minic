@@ -1,7 +1,12 @@
 use koopa::ir::{builder::*, Type, TypeKind, Value};
 
 use crate::{
-    InitVal, analysis::scope::Symbol, build_array_type, evaluate_const_exp, flatten::flatten_init_val, ir_generation::genfunc::FunctionGenerator, parser::ast::{Exp, LVal, VarDecl}
+    analysis::scope::Symbol,
+    build_array_type, evaluate_const_exp,
+    flatten::flatten_init_val,
+    ir_generation::genfunc::FunctionGenerator,
+    parser::ast::{Exp, LVal, VarDecl},
+    InitVal,
 };
 
 impl<'a> FunctionGenerator<'a> {
@@ -30,7 +35,7 @@ impl<'a> FunctionGenerator<'a> {
             let dims: Vec<usize> = def
                 .dims
                 .iter()
-                .map(|d| evaluate_const_exp(&self.symbol_table,d) as usize)
+                .map(|d| evaluate_const_exp(&self.symbol_table, d) as usize)
                 .collect();
 
             // 2. 分配内存 (alloc)
@@ -38,7 +43,9 @@ impl<'a> FunctionGenerator<'a> {
             let alloc_ptr = self.alloc_variable(ty.clone());
 
             // 3. 注册符号表
-            self.symbol_table.insert_var(def.ident.clone(), alloc_ptr , ty);
+            let ptr_type = self.func.dfg().value(alloc_ptr).ty().clone();
+            self.symbol_table
+                .insert_var(def.ident.clone(), alloc_ptr, ptr_type);
 
             // 4. 处理初始化
             if let Some(init) = &def.init {
@@ -91,48 +98,76 @@ impl<'a> FunctionGenerator<'a> {
     pub fn generate_assign(&mut self, lval: &LVal, exp: &Exp) {
         let val = self.generate_exp(exp);
         // 使用新函数计算地址
-        let (ptr , _ )= self.generate_lval_address(lval);
+        let (ptr, _) = self.generate_lval_address(lval);
         let store = self.func.dfg_mut().new_value().store(val, ptr);
         self.add_inst(store);
     }
 
     pub fn generate_lval_address(&mut self, lval: &LVal) -> (Value, Type) {
-        // 1. 查表，同时获取 Value 和 Type
+        // 1. 查表
         let (mut ptr, mut ptr_ty) = match self.symbol_table.lookup(&lval.ident) {
             Some(Symbol::Var(v, t)) => (*v, t.clone()),
             _ => panic!("Undefined variable: {}", lval.ident),
         };
 
-        // 2. 逐层应用索引
-        for index_exp in &lval.indices {
+        // 标记索引迭代器
+        let mut indices_iter = lval.indices.iter();
+
+        // 2. 【关键】判断基地址类型，决定第一步操作
+        // 检查是否是 "函数参数" (Alloc出来的二级指针 **T 或 **[T, N])
+        if let koopa::ir::TypeKind::Pointer(base) = ptr_ty.kind() {
+            if let koopa::ir::TypeKind::Pointer(_) = base.kind() {
+                // === 情况 A: 这是一个函数参数 (指针) ===
+
+                // 1. Load 出真正的基址 (从栈上读出指针值)
+                if !lval.indices.is_empty() {
+                    let load = self.func.dfg_mut().new_value().load(ptr);
+                    self.add_inst(load);
+
+                    ptr = load;
+                    ptr_ty = base.clone(); // 类型解开一层: **[i32, 10] -> *[i32, 10]
+
+                    // 2. 处理第一维索引 (必须用 getptr !)
+                    if let Some(first_idx_exp) = indices_iter.next() {
+                        let idx = self.generate_exp(first_idx_exp);
+
+                        // 【核心修复点】
+                        // 指针偏移使用 get_ptr，而不是 get_elem_ptr
+                        // *[i32, 10] --getptr--> *[i32, 10] (指向下一行)
+                        let next_ptr = self.func.dfg_mut().new_value().get_ptr(ptr, idx);
+                        self.add_inst(next_ptr);
+
+                        ptr = next_ptr;
+                        // 类型保持不变
+                    }
+                }
+            }
+        }
+
+        // 3. 处理剩余维度 (局部数组的所有维度，或参数数组的第二维及以后)
+        // 此时 ptr 肯定是指向数组的指针 (*[T, N])
+        for index_exp in indices_iter {
             let index_val = self.generate_exp(index_exp);
 
             match ptr_ty.kind() {
-                // 指针指向数组 (*[T, N]) -> getelemptr -> 结果类型 *T
-                koopa::ir::TypeKind::Pointer(base) if matches!(base.kind() , TypeKind::Array(_,_ )) => {
-                    // 生成指令
+                // 指针指向数组 -> 使用 getelemptr 钻入数组内部
+                koopa::ir::TypeKind::Pointer(base)
+                    if matches!(base.kind(), TypeKind::Array(_, _)) =>
+                {
                     let next_ptr = self.func.dfg_mut().new_value().get_elem_ptr(ptr, index_val);
                     self.add_inst(next_ptr);
-                    
-                    // 手动推导新类型: *[T, N] -> *T
-                    // base 是数组类型 [T, N]，我们需要它的元素类型 T，并包裹成指针 *T
+
+                    // 类型推导: *[T, N] -> *T
                     if let koopa::ir::TypeKind::Array(elem_ty, _) = base.kind() {
                         ptr = next_ptr;
                         ptr_ty = koopa::ir::Type::get_pointer(elem_ty.clone());
-                    } else { unreachable!() }
+                    } else {
+                        unreachable!()
+                    }
                 }
-                
-                // 指针指向整数 (*i32) -> getptr -> 结果类型 *i32
-                koopa::ir::TypeKind::Pointer(base) => {
-                    let next_ptr = self.func.dfg_mut().new_value().get_ptr(ptr, index_val);
-                    self.add_inst(next_ptr);
-                    
-                    // 类型不变: *i32 偏移后还是 *i32
-                    ptr = next_ptr;
-                    // ptr_ty 保持不变
-                }
-                
-                _ => panic!("Cannot index non-pointer type"),
+
+                // 错误捕获：如果在这里遇到 Pointer(Integer)，说明索引太多越界了，或者是逻辑错了
+                _ => panic!("Cannot index into non-array type. Type: {:?}", ptr_ty),
             }
         }
 

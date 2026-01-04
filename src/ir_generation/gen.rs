@@ -1,3 +1,4 @@
+use crate::build_param_type;
 use crate::parser::ast::Type;
 use crate::parser::ast::*;
 use crate::ir_generation::decl::process_global_decl;
@@ -18,8 +19,14 @@ fn declare_single_function(
     symbol_table: &mut SymbolTable,
 ) {
     // A. 准备参数类型列表
-    // SysY 的参数目前只有 int，所以全部转为 i32
-    let param_types: Vec<IrType> = func_def.params.iter().map(|_| IrType::get_i32()).collect();
+    // [修改] 不再硬编码为 i32，而是根据 AST 动态构建
+    let mut param_types = Vec::new();
+    for param in &func_def.params {
+        // 这里需要 symbol_table 来计算数组常数维度 (如 a[][N])
+        // 全局常量应该在 process_global_decl 阶段已经存入 symbol_table 了
+        let ty = build_param_type(param, symbol_table);
+        param_types.push(ty);
+    }
 
     // B. 准备返回值类型
     let ret_type = match func_def.func_type {
@@ -28,11 +35,10 @@ fn declare_single_function(
     };
 
     // C. 创建 FunctionData
-    // 名字加 @ 前缀符合 Koopa 规范
     let func_name = format!("@{}", func_def.ident);
     let mut func_data = FunctionData::new(func_name, param_types, ret_type);
 
-    // (可选) 设置参数名称，方便调试生成的 IR
+    // 设置参数名称
     for (i, param) in func_def.params.iter().enumerate() {
         let param_val = func_data.params()[i];
         func_data
@@ -40,28 +46,24 @@ fn declare_single_function(
             .set_value_name(param_val, Some(format!("%arg_{}", param.ident)));
     }
 
-    // D. 注册到 Program，拿到 Function Handle
+    // D. 注册到 Program
     let func_handle = program.new_func(func_data);
 
-    // E. 【关键】注册到全局符号表
-    // 以后在 generate_exp 里遇到 FuncCall(name) 时，就来查这个表
+    // E. 注册到全局符号表
     symbol_table.insert_func(func_def.ident.clone(), func_handle);
 }
 
-// 辅助函数：生成单个函数体
 fn generate_single_function(func_def: &FuncDef, program: &mut Program, symbol_table: &SymbolTable) {
     // A. 获取函数 Handle
-    // 此时一定能查到，因为第一遍已经全部注册了
     let func_handle = match symbol_table.lookup(&func_def.ident) {
         Some(Symbol::Func(h)) => *h,
-        _ => panic!("Function {} not found in symbol table", func_def.ident),
+        _ => panic!("Function {} not found", func_def.ident),
     };
 
-    // B. 获取 FunctionData 的可变引用
+    // B. 获取 FunctionData
     let func_data = program.func_mut(func_handle);
 
     // C. 初始化生成器
-    // 注意：传入 global_symbols 的克隆，因为每个函数都需要一份全局视图
     let mut gen = FunctionGenerator::new(func_data, symbol_table.clone());
 
     // D. 创建 Entry Block
@@ -75,38 +77,37 @@ fn generate_single_function(func_def: &FuncDef, program: &mut Program, symbol_ta
 
     // =========================================================
     // E. 【关键】处理形参 (Alloc + Store)
-    // Koopa 的参数是 Value，不可变；SysY 参数是变量，可变。
-    // 必须在入口处把 Value 拷贝到栈上的局部变量里。
     // =========================================================
 
-    // 获取 Koopa IR 中的参数 Value 列表
     let args = gen.func.params().to_vec();
 
     for (i, arg_val) in args.iter().enumerate() {
         let param_ast = &func_def.params[i];
 
-        // 1. 在栈上分配空间 (Alloc)
-        // 使用你现有的 alloc_variable 或 process_alloc 逻辑
-        // 这里假设你封装了一个 alloc_stack_variable
-        // 它会在 entry block 插入 alloc 指令，并返回该指针 Value
-        let alloc_ptr = gen.alloc_variable(IrType::get_i32());
-        let ptr_type = gen.func.dfg().value(alloc_ptr).ty().clone(); // 得到 *i32
+        // [修改] 1. 获取参数的真实 IR 类型 (可能是 i32，也可能是 *i32, *[i32, 3] 等)
+        let param_ty = build_param_type(param_ast, &gen.symbol_table);
 
-        // 2. 将参数值存入该空间 (Store)
+        // [修改] 2. 在栈上分配空间
+        // alloc_variable 内部会生成 alloc param_ty 指令，返回一个指向 param_ty 的指针 (即二级指针)
+        let alloc_ptr = gen.alloc_variable(param_ty);
+        
+        // 获取 alloc 指针的类型 (例如 **i32) 用于存入符号表
+        let ptr_type = gen.func.dfg().value(alloc_ptr).ty().clone();
+
+        // 3. 将参数值存入该空间
+        // store %arg_val (类型 T), %alloc_ptr (类型 *T)
         let store = gen.func.dfg_mut().new_value().store(*arg_val, alloc_ptr);
         gen.add_inst(store);
 
-        // 3. 将参数名注册到当前函数的局部符号表
-        // 以后在函数体内用到 param_ast.ident 时，查到的就是 alloc_ptr
+        // 4. 将参数名注册到符号表
         gen.symbol_table
-            .insert_var(param_ast.ident.clone(), alloc_ptr,ptr_type);
+            .insert_var(param_ast.ident.clone(), alloc_ptr, ptr_type);
     }
 
     // F. 生成函数体 Block
     gen.generate_block(&func_def.block);
 
-    // G. 处理 Void 函数可能的缺失 Ret
-    // 如果函数是 void 类型，且最后没有 return，手动补一个 ret
+    // G. 补全 Ret
     if let Type::Void = func_def.func_type {
         if !gen.is_cur_bb_terminated() {
             let ret_inst = gen.func.dfg_mut().new_value().ret(None);

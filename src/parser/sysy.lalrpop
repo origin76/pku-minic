@@ -47,11 +47,16 @@ FuncDef: FuncDef = {
     }
 }
 
-// FuncFParam ::= BType IDENT;
 FuncFParam: FuncFParam = {
-    <t:Type> <id:Ident> => FuncFParam {
+    // 改动点：ConstExp 后面加了个 ?，表示可选
+    <t:Type> <id:Ident> <dims:("[" <ConstExp?> "]")*> => FuncFParam {
         b_type: t,
         ident: id,
+        // 处理 dims: Vec<Option<Box<Exp>>>
+        // 如果是 None (即 []), 我们手动补一个 0，保证 dims 长度正确
+        dims: dims.into_iter().map(|opt| {
+            opt.unwrap_or_else(|| Box::new(Exp::PrimaryExp(Box::new(PrimaryExp::Number(0)))))
+        }).collect(),
     }
 }
 
