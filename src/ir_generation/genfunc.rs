@@ -95,23 +95,6 @@ impl<'a> FunctionGenerator<'a> {
                 let mut arg_values = Vec::new();
                 for arg in args {
                     let val = self.generate_exp(arg);
-                    let val_ty = self.func.dfg().value(val).ty().clone();
-                    println!("{}",self.func.name());
-                    println!("{}",val_ty.kind());
-                    // 检查是否是指向数组的指针
-                    // if let TypeKind::Pointer(base_ty) = val_ty.kind() {
-                    //     if matches!(base_ty.kind(),TypeKind::Array(_,_ )) {
-
-                    //         // 生成 getelemptr val, 0
-                    //         // 这会将 *[i32, 10] 转换为 *i32
-                    //         let zero = self.func.dfg_mut().new_value().integer(0);
-                    //         let decay = self.func.dfg_mut().new_value().get_elem_ptr(val, zero);
-                    //         self.add_inst(decay);
-                            
-                    //         // 更新 val 为退化后的指针
-                    //         val = decay;
-                    //     }
-                    // }
                     arg_values.push(val);
                 }
 

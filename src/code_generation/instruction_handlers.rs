@@ -13,9 +13,11 @@ impl super::asm::AsmBuilder<'_> {
         // 1. 准备左操作数 (LHS)
         // 注意：resolve_operand 可能会生成 li 指令，也会消耗寄存器池
         let lhs_reg = self.resolve_operand(bin.lhs(), dfg);
+        self.ctx.as_mut().unwrap().lock_reg(lhs_reg.as_str());
 
         // 2. 准备右操作数 (RHS)
         let rhs_reg = self.resolve_operand(bin.rhs(), dfg);
+        self.ctx.as_mut().unwrap().lock_reg(rhs_reg.as_str());
 
         // 3. 为当前运算的结果分配一个目标寄存器 (Dest)
         // alloc_reg 会将 result_val 绑定到该寄存器，供后续指令使用
@@ -159,7 +161,7 @@ impl super::asm::AsmBuilder<'_> {
 
             _ => panic!("暂不支持的二元运算: {:?}", bin.op()),
         }
-
+        self.ctx.as_mut().unwrap().unlock_all();
         // 优化：清理临时寄存器
         // 如果 lhs_reg 或 rhs_reg 是我们在 resolve_operand 里临时分配给立即数的(不在 val_map 中)
         // 理论上这里应该回收它们以供复用。
@@ -167,7 +169,8 @@ impl super::asm::AsmBuilder<'_> {
     }
 
     pub fn process_return(&mut self, ret: &Return, dfg: &DataFlowGraph) {
-        // 1. 如果有返回值，将其移动到 a0
+        self.ctx.as_mut().unwrap().spill_all(&mut self.output);
+
         if let Some(val) = ret.value() {
             let value_data = dfg.value(val);
 
@@ -208,78 +211,109 @@ impl super::asm::AsmBuilder<'_> {
     }
 
     pub fn process_alloc(&mut self, _result_val: Value, _alloc: &Alloc, _dfg: &DataFlowGraph) {
-      {}
+        {}
     }
+    
     pub fn process_load(&mut self, result_val: Value, load: &Load, dfg: &DataFlowGraph) {
         let src_ptr = load.src();
-
+        
         // 1. 分配目标寄存器
-        let dest_reg = self
-            .ctx
-            .as_mut()
-            .unwrap()
-            .alloc_reg_for_result(result_val, &mut self.output);
+        let dest_reg = self.ctx.as_mut().unwrap().alloc_reg_for_result(result_val, &mut self.output);
 
-        // 2. 检查源是否是栈槽
-        if let Some(offset) = self.ctx.as_mut().unwrap().stack_slots.get(&src_ptr) {
-            // === 情况 A: 从局部变量加载 ===
-            // 汇编: lw dest_reg, offset(sp)
-            if *offset >= -2048 && *offset <= 2047 {
-                writeln!(self.output, "  lw    {}, {}(sp)", dest_reg, offset).unwrap();
-            } else {
-                // 处理大偏移...
-            }
+        // ================================================================
+        // 【关键修复】区分 "读取局部变量" 和 "读取指针指向的内存"
+        // ================================================================
+        
+        // 判断源是否是局部 Alloc 指令
+        let is_local_alloc = if src_ptr.is_global() {
+            false
         } else {
-            // === 情况 B: 从普通指针加载 ===
-            let ptr_reg = self.resolve_operand(src_ptr, dfg);
-            writeln!(self.output, "  lw    {}, 0({})", dest_reg, ptr_reg).unwrap();
+            matches!(dfg.value(src_ptr).kind(), koopa::ir::ValueKind::Alloc(_))
+        };
+
+        // 2. 检查是否可以直接从栈槽加载 (Case A)
+        if is_local_alloc {
+            let offset_opt = self.ctx.as_ref().unwrap().stack_slots.get(&src_ptr).copied();
+            
+            if let Some(offset) = offset_opt {
+                // === 情况 A: 从局部变量加载 (Alloc) ===
+                // 语义：读取变量的值
+                if offset >= -2048 && offset <= 2047 {
+                    writeln!(self.output, "  lw    {}, {}(sp)", dest_reg, offset).unwrap();
+                } else {
+                    let tmp = self.ctx.as_mut().unwrap().get_temp_reg_for_address_calc(&mut self.output);
+                    writeln!(self.output, "  li    {}, {}", tmp, offset).unwrap();
+                    writeln!(self.output, "  add   {}, sp, {}", tmp, tmp).unwrap();
+                    writeln!(self.output, "  lw    {}, 0({})", dest_reg, tmp).unwrap();
+                }
+                
+                self.ctx.as_mut().unwrap().unlock_all();
+                return;
+            }
         }
+
+        // === 情况 B: 从指针加载 (GetElemPtr, Global, Param...) ===
+        // 语义：先获取指针的值(地址)，然后解引用该地址
+        
+        let ptr_reg = self.resolve_operand(src_ptr, dfg);
+        
+        // 生成: lw dest, 0(ptr)
+        writeln!(self.output, "  lw    {}, 0({})", dest_reg, ptr_reg).unwrap();
+
+        self.ctx.as_mut().unwrap().unlock_all();
     }
 
     pub fn process_store(&mut self, store: &Store, dfg: &DataFlowGraph) {
         let val = store.value();
-        let dest_ptr = store.dest();
+        let dest = store.dest();
 
         // 1. 准备要存的值
         let val_reg = self.resolve_operand(val, dfg);
         let val_reg_str = val_reg.to_string();
         self.ctx.as_mut().unwrap().lock_reg(&val_reg_str);
 
-        // 2. 检查 dest_ptr 是 Alloc 出来的栈槽，还是普通指针？
-        let offset_opt = self
-            .ctx
-            .as_ref()
-            .unwrap()
-            .stack_slots
-            .get(&dest_ptr)
-            .copied();
-
-        if let Some(offset) = offset_opt {
-            // === 情况 A: 存入局部变量 (Alloc) ===
-            // 直接使用 sp + offset 寻址
-            // 汇编: sw val_reg, offset(sp)
-
-            // 处理大立即数偏移 (超过 +/- 2047)
-            if offset >= -2048 && offset <= 2047 {
-                writeln!(self.output, "  sw    {}, {}(sp)", val_reg, offset).unwrap();
-            } else {
-                // 只有偏移量超级大时，才需要临时算地址
-                // 注意：这里用一个临时寄存器，用完即扔，不用分配
-                let tmp_reg = self
-                    .ctx
-                    .as_mut()
-                    .unwrap()
-                    .get_temp_reg_for_address_calc(&mut self.output);
-                writeln!(self.output, "  li    {}, {}", tmp_reg, offset).unwrap();
-                writeln!(self.output, "  add   {}, {}, sp", tmp_reg, tmp_reg).unwrap();
-                writeln!(self.output, "  sw    {}, 0({})", val_reg, tmp_reg).unwrap();
-            }
+        // ================================================================
+        // 【关键修复】安全检查 dest 类型
+        // ================================================================
+        
+        // 判断是否是局部 Alloc 指令
+        let is_local_alloc = if dest.is_global() {
+            // 全局变量不算局部 Alloc，它应该走下面的 resolve_operand -> la 逻辑
+            false 
         } else {
-            // === 情况 B: 存入普通指针 (比如数组指针参数，或者全局变量地址) ===
-            // 这个指针本身存在寄存器里
-            let ptr_reg = self.resolve_operand(dest_ptr, dfg);
-            writeln!(self.output, "  sw    {}, 0({})", val_reg, ptr_reg).unwrap();
+            // 只有非全局的，才去 DFG 里查
+            matches!(dfg.value(dest).kind(), koopa::ir::ValueKind::Alloc(_))
+        };
+
+        // 2. 尝试直接写栈 (Case A)
+        if is_local_alloc {
+            let offset_opt = self.ctx.as_ref().unwrap().stack_slots.get(&dest).copied();
+            
+            if let Some(offset) = offset_opt {
+                // === 情况 A: 存入局部变量 (Alloc) ===
+                if offset >= -2048 && offset <= 2047 {
+                    writeln!(self.output, "  sw    {}, {}(sp)", val_reg_str, offset).unwrap();
+                } else {
+                    let tmp_reg = self
+                        .ctx
+                        .as_mut()
+                        .unwrap()
+                        .get_temp_reg_for_address_calc(&mut self.output); // 使用 t6
+                    writeln!(self.output, "  li    {}, {}", tmp_reg, offset).unwrap();
+                    writeln!(self.output, "  add   {}, {}, sp", tmp_reg, tmp_reg).unwrap();
+                    writeln!(self.output, "  sw    {}, 0({})", val_reg_str, tmp_reg).unwrap();
+                }
+                
+                self.ctx.as_mut().unwrap().unlock_all();
+                return; 
+            }
         }
+
+        // === 情况 B: 目标是指针 (GetElemPtr, Global, Load...) ===
+        // 1. 如果是 GetElemPtr: resolve_operand 返回计算好的地址寄存器
+        // 2. 如果是 Global: resolve_operand 会生成 la 指令，返回存有全局地址的寄存器
+        let ptr_reg = self.resolve_operand(dest, dfg);
+        writeln!(self.output, "  sw    {}, 0({})", val_reg_str, ptr_reg).unwrap();
 
         self.ctx.as_mut().unwrap().unlock_all();
     }
@@ -288,7 +322,7 @@ impl super::asm::AsmBuilder<'_> {
         let cond_reg = self.resolve_operand(br.cond(), dfg);
         let true_name = self.get_bb_label(&br.true_bb(), dfg);
         let false_name = self.get_bb_label(&br.false_bb(), dfg);
-        
+
         self.ctx.as_mut().unwrap().spill_all(&mut self.output);
 
         let _ = writeln!(self.output, "  bnez  {}, {}", cond_reg, true_name);
@@ -309,53 +343,45 @@ impl super::asm::AsmBuilder<'_> {
         writeln!(self.output, "  j     {}", asm_label).unwrap();
     }
 
-    pub fn process_call(&mut self, inst_val: Value, call: &Call, dfg: &DataFlowGraph) {
-        // 1. 【关键】保护现场：Spill 所有活跃寄存器
-        // 必须在处理参数之前做，否则参数计算用的寄存器也会被清理
-        // 但这里有个技巧：参数也是 Value，如果先 Spill，后面 get_reg 会重新 load，虽然慢但安全。
-        // 全栈策略+SpillAll 可以规避这个问题，因为 get_reg 会 reload 到 tX。
+   pub fn process_call(&mut self, inst_val: Value, call: &Call, dfg: &DataFlowGraph) {
+        // 1. 保护现场
         self.ctx.as_mut().unwrap().spill_all(&mut self.output);
 
         let args = call.args();
 
         // 2. 传递参数
         for (i, &arg) in args.iter().enumerate() {
-            // 获取参数的值 (Load 到寄存器)
-            let val_data = dfg.value(arg);
-            let val_reg = match val_data.kind() {
-                // 情况 A: 参数是立即数 (half(10))
-                koopa::ir::ValueKind::Integer(int) => {
-                    let imm = int.value();
-                    let tmp = self
-                        .ctx
-                        .as_mut()
-                        .unwrap()
-                        .get_temp_reg_for_address_calc(&mut self.output);
-                    writeln!(self.output, "  li    {}, {}", tmp, imm).unwrap();
-                    tmp.to_string()
-                }
-                // 情况 B: 参数是变量
-                _ => self
-                    .ctx
-                    .as_mut()
-                    .unwrap()
-                    .get_reg_for_operand(arg, &mut self.output)
-                    .to_string(),
-            };
-
+            // 【核心修复】使用 resolve_operand 统一处理
+            // - 立即数 -> li
+            // - 普通变量 -> lw
+            // - 局部数组(Alloc) -> addi sp (这正是你缺失的逻辑！)
+            // - 全局变量 -> la
+            let val_reg = self.resolve_operand(arg, dfg);
+            
             if i < 8 {
-                // 前 8 个参数 -> 寄存器 a0-a7
+                // === 寄存器传参 (a0 - a7) ===
                 let target_reg = format!("a{}", i);
                 if val_reg != target_reg {
                     writeln!(self.output, "  mv    {}, {}", target_reg, val_reg).unwrap();
-                    // 注意：mv 到了 aX 后，aX 可能会被后续参数的计算覆盖
-                    // 如果你的 get_reg 可能会用到 aX，这里就有冲突风险。
-                    // 全栈策略+SpillAll 可以规避这个问题，因为 get_reg 会 reload 到 tX。
                 }
+                
+                // 【关键】锁定已填充的参数寄存器！
+                // 防止处理下一个参数时，resolve_operand 挑选了 target_reg 作为临时寄存器
+                self.ctx.as_mut().unwrap().lock_reg(&target_reg);
             } else {
-                // 后续参数 -> 栈 (0(sp), 4(sp)...)
-                let offset = (i - 8) * 4;
-                writeln!(self.output, "  sw    {}, {}(sp)", val_reg, offset).unwrap();
+                // === 栈传参 (Arg 9+) ===
+                // 存入 Outgoing Args 区域 (位于当前 SP 的最底部)
+                let offset = (i as i32 - 8) * 4;
+                
+                // 检查立即数范围
+                if offset >= -2048 && offset <= 2047 {
+                    writeln!(self.output, "  sw    {}, {}(sp)", val_reg, offset).unwrap();
+                } else {
+                    let tmp = self.ctx.as_mut().unwrap().get_temp_reg_for_address_calc(&mut self.output);
+                    writeln!(self.output, "  li    {}, {}", tmp, offset).unwrap();
+                    writeln!(self.output, "  add   {}, sp, {}", tmp, tmp).unwrap();
+                    writeln!(self.output, "  sw    {}, 0({})", val_reg, tmp).unwrap();
+                }
             }
         }
 
@@ -363,10 +389,11 @@ impl super::asm::AsmBuilder<'_> {
         let callee_name = &self.program.func(call.callee()).name()[1..];
         writeln!(self.output, "  call  {}", callee_name).unwrap();
 
-        // 4. 处理返回值
+        // 4. 【关键】调用结束后，解锁所有寄存器 (a0-a7 解放)
+        self.ctx.as_mut().unwrap().unlock_all();
+
+        // 5. 处理返回值
         if !dfg.value(inst_val).ty().is_unit() {
-            // 此时返回值在 a0
-            // 我们需要把它"接管"过来，分配一个寄存器存起来 (标记为 dirty)
             let dest_reg = self
                 .ctx
                 .as_mut()

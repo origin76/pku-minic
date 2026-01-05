@@ -1,6 +1,8 @@
+use crate::array::get_type_size;
+
 use super::reg_context::FuncContext;
 use koopa::ir::{
-    Program, Value, ValueKind,
+    Program, Type, Value, ValueKind, dfg::DataFlowGraph
 };
 use std::fmt::Write;
 
@@ -35,47 +37,74 @@ impl<'a> AsmBuilder<'a> {
         }
     }
 
+    pub fn get_value_type(&self, val: Value, dfg: &DataFlowGraph) -> Type {
+        if val.is_global() {
+            // 全局变量：去 Program 查
+            self.program.borrow_value(val).ty().clone()
+        } else {
+            // 局部变量：去 DFG 查
+            dfg.value(val).ty().clone()
+        }
+    }
+
+    fn generate_global_value(&mut self, program: &Program, value: Value) {
+        let data = program.borrow_value(value);
+        
+        match data.kind() {
+            // 标量数值
+            ValueKind::Integer(int) => {
+                let _ = writeln!(self.output, "  .word {}", int.value());
+            }
+            // 聚合体 (数组) -> 递归生成每个元素
+            ValueKind::Aggregate(agg) => {
+                for &elem in agg.elems() {
+                    self.generate_global_value(program, elem);
+                }
+            }
+            // 聚合体内部可能包含 ZeroInit (部分 0 初始化)
+            ValueKind::ZeroInit(_) => {
+                let size = get_type_size(&data.ty());
+                let _ = writeln!(self.output, "  .zero {}", size);
+            }
+            _ => panic!("Invalid global init value type"),
+        }
+    }
+
     pub fn generate_global(&mut self, program: &Program, value: Value) {
-        // 获取 Value 的详细数据
         let value_data = program.borrow_value(value);
 
-        // 我们只关心 GlobalAlloc 指令
         if let ValueKind::GlobalAlloc(alloc) = value_data.kind() {
-            // 1. 获取变量名 (去掉 @ 前缀)
             let name = value_data.name().as_ref().unwrap().replace("@", "");
-
-            // 2. 获取初始值
             let init_val = alloc.init();
             let init_data = program.borrow_value(init_val);
 
-            // 3. 根据初始值类型决定放入 .data 还是 .bss
             match init_data.kind() {
-                // === 情况 A: 整数初始化 (int a = 10;) -> .data ===
-                ValueKind::Integer(int) => {
-                    let _ = writeln!(self.output, "  .data"); // 切换到数据段
-                    let _ = writeln!(self.output, "  .globl {}", name);
-                    let _ = writeln!(self.output, "{}:", name);
-                    let _ = writeln!(self.output, "  .word {}", int.value()); // 写入 4 字节整数
-                    let _ = writeln!(self.output, ""); // 空行美观
-                }
-
-                // === 情况 B: 零初始化 (int a;) -> .bss ===
+                // === 情况 A: 零初始化 (int a; 或 int a[10];) -> .bss ===
                 ValueKind::ZeroInit(_) => {
-                    let _ = writeln!(self.output, "  .bss"); // 切换到 BSS 段
+                    let _ = writeln!(self.output, "  .bss");
                     let _ = writeln!(self.output, "  .globl {}", name);
                     let _ = writeln!(self.output, "{}:", name);
-                    // .zero N 表示分配 N 字节并填 0
-                    // i32 占 4 字节
-                    let _ = writeln!(self.output, "  .zero 4");
+                    
+                    // 【修复】不能写死 4，必须根据类型计算大小
+                    // 例如 [i32, 10] 需要 .zero 40
+                    let size = get_type_size(&init_data.ty());
+                    let _ = writeln!(self.output, "  .zero {}", size);
                     let _ = writeln!(self.output, "");
                 }
 
-                // === 情况 C: 聚合类型 (数组) ===
-                // 如果你以后支持数组，这里会是 ValueKind::Aggregate
-                // 需要递归生成 .word 或 .zero
-                _ => {
-                    // 暂时处理不了复杂类型，或者留空
+                // === 情况 B: 有初始化 (int a=1; 或 int a[2]={1,2};) -> .data ===
+                ValueKind::Integer(_) | ValueKind::Aggregate(_) => {
+                    let _ = writeln!(self.output, "  .data");
+                    let _ = writeln!(self.output, "  .globl {}", name);
+                    let _ = writeln!(self.output, "{}:", name);
+                    
+                    // 调用递归辅助函数生成 .word 序列
+                    self.generate_global_value(program, init_val);
+                    
+                    let _ = writeln!(self.output, "");
                 }
+
+                _ => {}
             }
         }
     }

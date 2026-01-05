@@ -1,8 +1,6 @@
 use super::reg_context::FuncContext;
 use koopa::ir::{
-    dfg::DataFlowGraph,
-    layout::BasicBlockNode,
-    BasicBlock, FunctionData, Value, ValueKind,
+    dfg::DataFlowGraph, layout::BasicBlockNode, BasicBlock, FunctionData, Value, ValueKind,
 };
 use std::fmt::Write;
 
@@ -92,11 +90,11 @@ impl super::asm::AsmBuilder<'_> {
         self.ctx = None;
     }
 
-    pub fn get_bb_label(&self, bb: &BasicBlock , dfg: &DataFlowGraph) -> String {
+    pub fn get_bb_label(&self, bb: &BasicBlock, dfg: &DataFlowGraph) -> String {
         // 1. 获取函数名，并去掉开头的 '@'
         // self.func.name() 返回的是 "@main"，我们需要 "main"
         let func_name = &self.ctx.as_ref().unwrap().name[1..];
-        
+
         // 2. 获取基本块名，并去掉开头的 '%'
         // bb_name 返回的是 "%entry" 或 "%while_entry_1"，我们需要 "entry"
         let raw_bb_name = dfg.bb(*bb).name().as_ref().unwrap();
@@ -150,30 +148,35 @@ impl super::asm::AsmBuilder<'_> {
             ValueKind::Call(c) => {
                 self.process_call(inst, c, dfg);
             }
+            ValueKind::GetPtr(ptr) => self.process_get_ptr(inst, ptr, dfg),
+            ValueKind::GetElemPtr(ptr) => self.process_get_elem_ptr(inst, ptr, dfg),
             _ => {}
         }
     }
 
     pub fn resolve_operand(&mut self, val: Value, dfg: &DataFlowGraph) -> String {
         if val.is_global() {
-            // 1. 从 Program 中获取数据 (不能用 dfg.value!)
             let data = self.program.borrow_value(val);
-            
-            // 2. 获取全局变量名字 (去掉 @)
-            let name = data.name().as_ref().expect("Global must have name").replace("@", "");
+            let name = data.name().as_ref().unwrap().replace("@", "");
 
-            // 3. 生成加载地址指令 (la reg, symbol)
-            // 因为 resolve_operand 的契约是返回一个"存有该值的寄存器"
-            // 对于全局变量指针，我们需要把它的地址 load 到临时寄存器里
-            let tmp_reg = self
+            // 【修改】申请一个正规的临时寄存器 (如 t0)，而不是 t6
+            // 因为这个地址可能要活到下一条指令
+            // 这里的 String::new() 只是为了满足 find_free... 的接口，不需要 spill output
+            let mut trash = String::new();
+            let reg_idx = self
                 .ctx
                 .as_mut()
                 .unwrap()
-                .get_temp_reg_for_address_calc(&mut self.output);
-            
-            writeln!(self.output, "  la    {}, {}", tmp_reg, name).unwrap();
-            
-            return tmp_reg.to_string();
+                .find_free_reg_or_spill(&mut trash);
+            // 如果触发了 spill，要把 spill 指令写出去！
+            if !trash.is_empty() {
+                write!(self.output, "{}", trash).unwrap();
+            }
+
+            let reg_name = self.ctx.as_ref().unwrap().phys_regs[reg_idx];
+
+            writeln!(self.output, "  la    {}, {}", reg_name, name).unwrap();
+            return reg_name.to_string();
         }
         let value_data = dfg.value(val);
 
@@ -200,57 +203,88 @@ impl super::asm::AsmBuilder<'_> {
                     // 2. 生成加载立即数的指令
                     writeln!(self.output, "  li    {}, {}", reg_name, imm).unwrap();
 
-                    // 3. 【关键】这个寄存器存的是临时值，不是某个 Value
-                    // 我们不需要将其 bind 到 val 上。
-                    // 但是，为了防止处理下一个操作数时把它 spill 掉，最好锁住它
-                    // (如果你在外部调用处统一 lock，这里可以不 lock，但建议返回后在外部 lock)
-                    self.ctx.as_mut().unwrap().lock_reg(reg_name);
-
                     reg_name.to_string()
                 }
             }
 
-            koopa::ir::ValueKind::FuncArgRef(arg) => {
+            ValueKind::Alloc(_) => {
+                // 1. 获取栈偏移
+                let offset = self
+                    .ctx
+                    .as_mut()
+                    .unwrap()
+                    .stack_slots
+                    .get(&val)
+                    .copied()
+                    .unwrap();
+
+                // 【修改】申请正规寄存器 (如 t0)
+                let mut trash = String::new();
+                let reg_idx = self
+                    .ctx
+                    .as_mut()
+                    .unwrap()
+                    .find_free_reg_or_spill(&mut trash);
+                if !trash.is_empty() {
+                    write!(self.output, "{}", trash).unwrap();
+                }
+
+                let reg_name = self.ctx.as_ref().unwrap().phys_regs[reg_idx];
+
+                if offset >= -2048 && offset <= 2047 {
+                    writeln!(self.output, "  addi  {}, sp, {}", reg_name, offset).unwrap();
+                } else {
+                    // 大偏移：使用 t6 辅助计算，结果存入 reg_name (t0)
+                    // li t6, offset
+                    // add t0, sp, t6
+                    writeln!(self.output, "  li    t6, {}", offset).unwrap();
+                    writeln!(self.output, "  add   {}, sp, t6", reg_name).unwrap();
+                }
+
+                // 返回正规寄存器名，外部会 lock 它，保证安全
+                return reg_name.to_string();
+            }
+
+            ValueKind::FuncArgRef(arg) => {
                 let index = arg.index();
                 if index < 8 {
-                    // 如果是前 8 个参数，直接返回对应的物理寄存器名
+                    // 情况 A: 寄存器传参 (a0 - a7)
                     format!("a{}", index)
                 } else {
-                    if index < 8 {
-                        // 情况 A: 寄存器传参 (a0 - a7)
-                        format!("a{}", index)
-                    } else {
-                        // 情况 B: 栈传参 (index >= 8)
-                        // 1. 获取当前函数的栈帧大小
-                        // 注意：这要求你在 generate_function 开头已经计算好了 ctx.stack_size (align_stack_size)
-                        let frame_size = self.ctx.as_ref().unwrap().total_frame_size;
-                        // 如果你的 stack_size 还没加上 ra/s0 的 8 字节，记得加上:
-                        // let frame_size = self.ctx.as_ref().unwrap().raw_stack_size_with_ra_s0_aligned;
+                    // 情况 B: 栈传参 (index >= 8)
+                    
+                    // 1. 获取偏移量
+                    let frame_size = self.ctx.as_ref().unwrap().total_frame_size;
+                    let offset = frame_size + (index as i32 - 8) * 4;
 
-                        // 2. 计算相对于当前 SP 的偏移量
-                        let offset = frame_size + (index as i32 - 8) * 4;
-
-                        // 3. 申请一个临时寄存器来存放加载进来的参数
-                        // 因为 resolve_operand 必须返回一个寄存器名供后续指令使用
-                        let tmp_reg = self
-                            .ctx
-                            .as_mut()
-                            .unwrap()
-                            .get_temp_reg_for_address_calc(&mut self.output);
-
-                        // 4. 生成 Load 指令 (注意处理大立即数)
-                        if offset >= -2048 && offset <= 2047 {
-                            writeln!(self.output, "  lw    {}, {}(sp)", tmp_reg, offset).unwrap();
-                        } else {
-                            // 偏移量太大，需要先算地址
-                            writeln!(self.output, "  li    {}, {}", tmp_reg, offset).unwrap();
-                            writeln!(self.output, "  add   {}, {}, sp", tmp_reg, tmp_reg).unwrap();
-                            writeln!(self.output, "  lw    {}, 0({})", tmp_reg, tmp_reg).unwrap();
-                        }
-
-                        // 5. 返回临时寄存器名
-                        tmp_reg.to_string()
+                    // 2. 分配目标寄存器 (用于存放加载进来的参数值)
+                    // 必须先分配，确保处理潜在的 Spill
+                    let mut trash = String::new();
+                    let reg_idx = self
+                        .ctx
+                        .as_mut()
+                        .unwrap()
+                        .find_free_reg_or_spill(&mut trash);
+                    if !trash.is_empty() {
+                        write!(self.output, "{}", trash).unwrap();
                     }
+                    let reg_name = self.ctx.as_ref().unwrap().phys_regs[reg_idx];
+
+                    // 3. 【核心修复】生成 lw 指令，而不是 addi
+                    if offset >= -2048 && offset <= 2047 {
+                        // 修正前: addi reg, sp, offset (错误：算出了地址)
+                        // 修正后: lw   reg, offset(sp) (正确：读出了值)
+                        writeln!(self.output, "  lw    {}, {}(sp)", reg_name, offset).unwrap();
+                    } else {
+                        // 大偏移量处理
+                        // 先用 t6 算出绝对地址，再 load
+                        writeln!(self.output, "  li    t6, {}", offset).unwrap();
+                        writeln!(self.output, "  add   t6, sp, t6").unwrap(); // t6 = addr
+                        writeln!(self.output, "  lw    {}, 0(t6)", reg_name).unwrap(); // reg = *t6
+                    }
+
+                    // 4. 返回寄存器名
+                    reg_name.to_string()
                 }
             }
 
@@ -270,6 +304,4 @@ impl super::asm::AsmBuilder<'_> {
             }
         }
     }
-
-
 }

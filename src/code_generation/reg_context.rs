@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
 
+use koopa::ir::FunctionData;
+
+use crate::array::get_type_size;
+
 // 1. 定义寄存器分配/状态管理的上下文
 #[derive(Debug, Clone)]
 pub struct RegInfo {
@@ -48,8 +52,7 @@ impl FuncContext {
         // 定义可用的临时寄存器，根据 RISC-V 约定
         // 优先使用 t0-t6, a0-a7
         let regs = vec![
-            "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5", "a6",
-            "a7",
+            "t0", "t1", "t2", "t3", "t4", "t5", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
         ];
 
         let reg_count = regs.len();
@@ -87,7 +90,11 @@ impl FuncContext {
     /// 获取操作数 (Operand) 所在的寄存器
     /// 如果 Value 已经在寄存器中，直接返回
     /// 如果不在，分配一个寄存器（可能触发 Spill），并生成 lw 指令
-    pub fn get_reg_for_operand(&mut self, val: koopa::ir::Value, output: &mut String) -> &'static str {
+    pub fn get_reg_for_operand(
+        &mut self,
+        val: koopa::ir::Value,
+        output: &mut String,
+    ) -> &'static str {
         // 1. 检查是否已经在寄存器中 (Hit)
         if let Some(&reg_idx) = self.value_in_reg.get(&val) {
             self.touch_lru(reg_idx); // 更新 LRU
@@ -100,10 +107,20 @@ impl FuncContext {
 
         // 3. 获取该 Value 在栈上的位置
         let offset = self.get_or_alloc_stack_slot(val);
+        let reg_name = self.phys_regs[reg_idx];
 
         // 4. 生成 Load 指令: lw reg, offset(sp)
-        let reg_name = self.phys_regs[reg_idx];
-        writeln!(output, "  lw    {}, {}(sp)", reg_name, offset).unwrap();
+        if offset >= -2048 && offset <= 2047 {
+            writeln!(output, "  lw    {}, {}(sp)", reg_name, offset).unwrap();
+        } else {
+            // 大偏移：借用 t6 计算地址
+            // t6 = offset
+            // t6 = sp + t6
+            // lw reg, 0(t6)
+            writeln!(output, "  li    t6, {}", offset).unwrap();
+            writeln!(output, "  add   t6, sp, t6").unwrap();
+            writeln!(output, "  lw    {}, 0(t6)", reg_name).unwrap();
+        }
 
         // 5. 更新状态
         self.update_reg_map(reg_idx, val);
@@ -116,7 +133,11 @@ impl FuncContext {
     /// 为结果 (Result) 分配一个新寄存器
     /// 这里的 Value 是还没有被计算出来的，所以不需要 Load
     /// 分配后会标记为 dirty，因为接下来马上要被写入
-    pub fn alloc_reg_for_result(&mut self, val: koopa::ir::Value, output: &mut String) -> &'static str {
+    pub fn alloc_reg_for_result(
+        &mut self,
+        val: koopa::ir::Value,
+        output: &mut String,
+    ) -> &'static str {
         // 1. 找一个空闲寄存器或者 Spill
         let reg_idx = self.find_free_reg_or_spill(output);
 
@@ -141,16 +162,8 @@ impl FuncContext {
         self.locked_regs.clear();
     }
 
-    pub fn get_temp_reg_for_address_calc(&mut self, output: &mut String) -> &'static str {
-        // 1. 调用现有的逻辑找一个可用的坑位
-        // 如果所有寄存器都满了，find_free_reg_or_spill 会自动把最久没用的那个 Spill 到栈上
-        // 并清空该寄存器的状态 (value=None, dirty=false)
-        let reg_idx = self.find_free_reg_or_spill(output);
-
-        // 2. 直接返回名字
-        // 注意：我们【不】调用 update_reg_map，也不设置 reg_status.value
-        // 因为这个寄存器马上就会被用作临时用途，用完就可以被当作"空闲"的再次分配
-        self.phys_regs[reg_idx]
+    pub fn get_temp_reg_for_address_calc(&mut self, _output: &mut String) -> &'static str {
+        "t6"
     }
 
     // ==========================================
@@ -201,7 +214,14 @@ impl FuncContext {
             // 如果是脏的，必须写回栈
             if is_dirty {
                 let offset = self.get_or_alloc_stack_slot(old_val);
-                writeln!(output, "  sw    {}, {}(sp)", reg_name, offset).unwrap();
+                if offset >= -2048 && offset <= 2047 {
+                    writeln!(output, "  sw    {}, {}(sp)", reg_name, offset).unwrap();
+                } else {
+                    // 使用 t6
+                    writeln!(output, "  li    t6, {}", offset).unwrap();
+                    writeln!(output, "  add   t6, sp, t6").unwrap();
+                    writeln!(output, "  sw    {}, 0(t6)", reg_name).unwrap();
+                }
             }
 
             // 解除旧 Value 到这个寄存器的映射
@@ -264,7 +284,14 @@ impl FuncContext {
                 // 如果是脏的，写回栈
                 if is_dirty {
                     let offset = self.get_or_alloc_stack_slot(val);
-                    writeln!(output, "  sw    {}, {}(sp)", reg_name, offset).unwrap();
+                    if offset >= -2048 && offset <= 2047 {
+                        writeln!(output, "  sw    {}, {}(sp)", reg_name, offset).unwrap();
+                    } else {
+                        // 使用 t6 计算地址，绝对安全
+                        writeln!(output, "  li    t6, {}", offset).unwrap();
+                        writeln!(output, "  add   t6, sp, t6").unwrap();
+                        writeln!(output, "  sw    {}, 0(t6)", reg_name).unwrap();
+                    }
                 }
 
                 // 无论是否 dirty，都要移除映射
@@ -279,16 +306,13 @@ impl FuncContext {
         }
     }
 
-    /// 分析整个函数的栈帧需求，计算总大小并为每个变量预分配栈槽
-    pub fn analyze_frame(&mut self, func: &koopa::ir::FunctionData) {
-        // ==========================================
-        // 步骤 1: 扫描最大的函数调用参数空间 (Outgoing Args)
-        // 这个区域位于栈的最底部 (0(sp) ~ max_args_space(sp))
-        // ==========================================
-        let mut max_args_space = 0;
+    pub fn analyze_frame(&mut self, func: &FunctionData) {
+        self.stack_slots.clear();
 
+        // 1. 预留参数区
+        let mut max_args_space = 0;
         for (_, bb_node) in func.layout().bbs() {
-            for (&inst,_) in bb_node.insts() {
+            for (&inst, _) in bb_node.insts() {
                 // 检查是否是 Call 指令
                 if let koopa::ir::ValueKind::Call(call) = func.dfg().value(inst).kind() {
                     let arg_count = call.args().len();
@@ -312,7 +336,7 @@ impl FuncContext {
         let mut current_offset = self.max_outgoing_args_size;
 
         for (_, bb_node) in func.layout().bbs() {
-            for (&inst,_) in bb_node.insts() {
+            for (&inst, _) in bb_node.insts() {
                 let ty = func.dfg().value(inst).ty();
 
                 // 凡是有返回值的指令，都预留一个栈槽 (全栈策略)
@@ -325,15 +349,54 @@ impl FuncContext {
         }
 
         // 记录除去 RA/S0 之外的栈大小 (用于调试或特定计算)
+
+        self.max_outgoing_args_size = max_args_space;
+        current_offset += max_args_space;
+
+        // 2. 预分配所有指令
+        for (_, bb) in func.layout().bbs() {
+            for (&inst, _) in bb.insts() {
+                let value_data = func.dfg().value(inst);
+                let ty = value_data.ty();
+
+                // 如果是 Void 类型，不分配
+                if ty.is_unit() {
+                    continue;
+                }
+
+                // 记录当前分配的偏移量
+                self.stack_slots.insert(inst, current_offset);
+
+                // === 【核心修复】计算需要分配的大小 ===
+                let size = match value_data.kind() {
+                    koopa::ir::ValueKind::Alloc(_) => {
+                        // 对于 Alloc 指令，ty 是指针类型 (例如 *[i32, 10])
+                        // 我们需要分配的是它指向的数据的大小 (即 [i32, 10] 的大小)
+                        if let koopa::ir::TypeKind::Pointer(base_ty) = ty.kind() {
+                            get_type_size(base_ty) // 调用你之前写的 get_type_size
+                        } else {
+                            4 // 理论上不可能发生
+                        }
+                    }
+                    _ => {
+                        // 对于其他指令 (Load, Add, GetElemPtr...)
+                        // 它们产生的是一个临时值 (i32 或 指针)
+                        // 只需要分配 4 字节来存储这个“值”本身
+                        // (假设 RV32 架构，所有临时变量/地址都占 4 字节)
+                        get_type_size(ty)
+                        // 或者简单写成 4，因为 SysY 中非 alloc 的结果通常都能塞进寄存器/4字节栈槽
+                    }
+                };
+
+                // 累加偏移量 (对齐到 4 字节，虽然 i32 默认就是 4)
+                current_offset += size as i32;
+            }
+        }
+
         self.stack_size = current_offset;
 
-        // ==========================================
-        // 步骤 3: 计算最终对齐的总大小
-        // 加上 RA(4) + S0(4) = 8 字节
-        // ==========================================
-        let size_with_regs = self.stack_size + 8;
-
-        // 16 字节对齐
-        self.total_frame_size = (size_with_regs + 15) & !15;
+        // 3. 计算最终大小 (RA + S0)
+        let total = self.stack_size + 8;
+        self.total_frame_size = (total + 15) & !15;
     }
 }
