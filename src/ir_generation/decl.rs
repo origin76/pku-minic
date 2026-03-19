@@ -4,27 +4,15 @@ use koopa::ir::{
 };
 
 use crate::{
-    ConstInitVal, FuncFParam, InitVal, analysis::scope::SymbolTable, flatten_const_init_val, ir_generation::constval::evaluate_const_exp, parser::ast::Decl
+    analysis::scope::SymbolTable,
+    ir_generation::{
+        constval::evaluate_const_exp,
+        flatten::{flatten_const_init_val, flatten_global_init_val},
+    },
+    parser::ast::{ConstInitVal, Decl, FuncFParam, InitVal},
 };
 
 use koopa::ir::{Type, Value};
-
-/// 辅助：递归展平 InitVal (处理 {1, {2, 3}} 这种情况)
-fn flatten_global_init_val(init: &InitVal, symbol_table: &SymbolTable) -> Vec<i32> {
-    let mut values = Vec::new();
-    match init {
-        InitVal::Exp(exp) => {
-            // 全局变量初始化必须是常量表达式
-            values.push(evaluate_const_exp(symbol_table, exp));
-        }
-        InitVal::List(list) => {
-            for item in list {
-                values.extend(flatten_global_init_val(item, symbol_table));
-            }
-        }
-    }
-    values
-}
 
 /// 辅助：根据维度生成 Koopa 数组类型
 pub fn build_array_type(dims: &[usize]) -> Type {

@@ -1,26 +1,14 @@
 use koopa::ir::{BinaryOp, builder::{LocalInstBuilder, ValueBuilder}};
 
 use crate::{
-    analysis::scope::{Symbol, SymbolTable}, build_array_type, ir_generation::genfunc::FunctionGenerator, parser::ast::*
+    analysis::scope::{Symbol, SymbolTable},
+    ir_generation::{
+        decl::build_array_type,
+        flatten::flatten_const_init_val,
+        genfunc::FunctionGenerator,
+    },
+    parser::ast::*,
 };
-
-pub fn flatten_const_init_val(init: &ConstInitVal, symbol_table: &mut SymbolTable) -> Vec<i32> {
-    let mut values = Vec::new();
-    match init {
-        // 遇到基本数值：计算并加入列表
-        ConstInitVal::Exp(exp) => {
-            let val = evaluate_const_exp(&symbol_table, exp);
-            values.push(val);
-        }
-        // 遇到列表：递归处理每个子项
-        ConstInitVal::List(list) => {
-            for item in list {
-                values.extend(flatten_const_init_val(item, symbol_table));
-            }
-        }
-    }
-    values
-}
 
 impl<'a> FunctionGenerator<'a> {
     pub fn generate_decl(&mut self, decl: &Decl) {
@@ -51,7 +39,7 @@ impl<'a> FunctionGenerator<'a> {
                 let total_len: usize = dims.iter().product();
 
                 // 1. 展平并求值数据
-                let mut values = flatten_const_init_val(&def.init, &mut self.symbol_table);
+                let mut values = flatten_const_init_val(&def.init, &self.symbol_table);
 
                 // 2. 补零 (SysY 规范)
                 if values.len() > total_len {

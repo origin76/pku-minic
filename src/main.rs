@@ -4,7 +4,11 @@ use std::io::Result;
 use std::io::Write;
 use lalrpop_util::lalrpop_mod;
 
-use complier_dev::*;
+use complier_dev::{
+    code_generation::asm::AsmBuilder,
+    ir_generation::gen::GenerateProgram,
+    parser,
+};
 use koopa::ir::Program;
 use koopa::back::KoopaGenerator;
 

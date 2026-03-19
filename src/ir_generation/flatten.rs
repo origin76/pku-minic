@@ -1,8 +1,12 @@
 use koopa::ir::{Value, builder::{LocalInstBuilder, ValueBuilder}};
 
-use crate::{ConstInitVal, Exp, FunctionGenerator, InitVal, SymbolTable, evaluate_const_exp};
+use crate::{
+    analysis::scope::SymbolTable,
+    ir_generation::{constval::evaluate_const_exp, genfunc::FunctionGenerator},
+    parser::ast::{ConstInitVal, Exp, InitVal},
+};
 
-// 对外接口
+// 展平初始化列表，统一给局部/全局/常量初始化复用。
 pub(crate) fn flatten_init_val(init: &InitVal) -> Vec<Exp> {
     let mut values = Vec::new();
     match init {
@@ -17,7 +21,8 @@ pub(crate) fn flatten_init_val(init: &InitVal) -> Vec<Exp> {
     }
     values
 }
-pub fn flatten_const_init_val(init: &ConstInitVal, symbol_table: &SymbolTable) -> Vec<i32> {
+
+pub(crate) fn flatten_const_init_val(init: &ConstInitVal, symbol_table: &SymbolTable) -> Vec<i32> {
     let mut values = Vec::new();
     match init {
         ConstInitVal::Exp(exp) => {
@@ -33,7 +38,7 @@ pub fn flatten_const_init_val(init: &ConstInitVal, symbol_table: &SymbolTable) -
     values
 }
 
-pub fn flatten_global_init_val(init: &InitVal, symbol_table: &SymbolTable) -> Vec<i32> {
+pub(crate) fn flatten_global_init_val(init: &InitVal, symbol_table: &SymbolTable) -> Vec<i32> {
     let mut values = Vec::new();
     match init {
         InitVal::Exp(exp) => {
@@ -47,7 +52,6 @@ pub fn flatten_global_init_val(init: &InitVal, symbol_table: &SymbolTable) -> Ve
     }
     values
 }
-
 
 impl<'a> FunctionGenerator<'a> {
     /// 给定基地址和维度，计算线性索引 i 对应的元素指针

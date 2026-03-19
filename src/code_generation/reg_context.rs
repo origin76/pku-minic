@@ -3,7 +3,7 @@ use std::fmt::Write;
 
 use koopa::ir::FunctionData;
 
-use crate::array::get_type_size;
+use super::array::get_type_size;
 
 // 1. 定义寄存器分配/状态管理的上下文
 #[derive(Debug, Clone)]

@@ -2,11 +2,13 @@ use koopa::ir::{builder::*, Type, TypeKind, Value};
 
 use crate::{
     analysis::scope::Symbol,
-    build_array_type, evaluate_const_exp,
-    flatten::flatten_init_val,
-    ir_generation::genfunc::FunctionGenerator,
-    parser::ast::{Exp, LVal, VarDecl},
-    InitVal,
+    ir_generation::{
+        constval::evaluate_const_exp,
+        decl::build_array_type,
+        flatten::flatten_init_val,
+        genfunc::FunctionGenerator,
+    },
+    parser::ast::{Exp, InitVal, LVal, VarDecl},
 };
 
 impl<'a> FunctionGenerator<'a> {

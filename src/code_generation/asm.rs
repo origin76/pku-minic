@@ -1,6 +1,5 @@
-use crate::array::get_type_size;
-
 use super::reg_context::FuncContext;
+use super::array::get_type_size;
 use koopa::ir::{
     Program, Type, Value, ValueKind, dfg::DataFlowGraph
 };

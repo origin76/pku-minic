@@ -1,7 +1,6 @@
-use crate::build_param_type;
 use crate::parser::ast::Type;
 use crate::parser::ast::*;
-use crate::ir_generation::decl::process_global_decl;
+use crate::ir_generation::decl::{build_param_type, process_global_decl};
 use crate::ir_generation::genfunc::FunctionGenerator;
 use crate::analysis::scope::{Symbol, SymbolTable};
 use koopa::ir::{builder_traits::*};

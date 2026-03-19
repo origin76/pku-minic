@@ -1,7 +1,7 @@
 use koopa::ir::{dfg::DataFlowGraph, Type, TypeKind, Value};
 use std::fmt::Write;
 
-use crate::AsmBuilder;
+use super::asm::AsmBuilder;
 
 pub fn get_type_size(ty: &Type) -> i32 {
     match ty.kind() {
