@@ -1,13 +1,13 @@
-use std::collections::HashMap;
 use koopa::ir::{Function, Type, Value};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum Symbol {
     // 对于 const int a = 10; 我们直接记录它的整数值
     Const(i32),
-    ConstArray(Vec<i32>), 
+    ConstArray(Vec<i32>),
     // 对于 int a = 10; 我们记录它在 Koopa IR 中的内存地址 (Alloc 指令的返回值)
-    Var(Value,Type), 
+    Var(Value, Type),
     Func(Function),
 }
 
@@ -21,7 +21,7 @@ impl SymbolTable {
     pub fn new() -> Self {
         Self {
             // 初始化时推入一个全局作用域 (虽然 SysY 暂时只用 main，但保持习惯)
-            scopes: vec![HashMap::new()], 
+            scopes: vec![HashMap::new()],
         }
     }
 
@@ -43,9 +43,9 @@ impl SymbolTable {
         }
     }
 
-    pub fn insert_var(&mut self, name: String, ptr: Value , ty : Type) {
+    pub fn insert_var(&mut self, name: String, ptr: Value, ty: Type) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, Symbol::Var(ptr,ty));
+            scope.insert(name, Symbol::Var(ptr, ty));
         }
     }
 

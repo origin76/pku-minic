@@ -1,4 +1,4 @@
-use super::reg_context::FuncContext;
+use super::{allocator::allocate_registers, reg_context::FuncContext};
 use koopa::ir::{
     dfg::DataFlowGraph, layout::BasicBlockNode, BasicBlock, FunctionData, Value, ValueKind,
 };
@@ -7,7 +7,8 @@ use std::fmt::Write;
 impl super::asm::AsmBuilder<'_> {
     pub fn generate_function(&mut self, func: &FunctionData) {
         // 1. 【重置上下文】
-        self.ctx = Some(FuncContext::new(func.name().to_string()));
+        let allocation = allocate_registers(func);
+        self.ctx = Some(FuncContext::new(func.name().to_string(), allocation));
         self.ctx.as_mut().unwrap().analyze_frame(func);
 
         // 2. 打印函数标签
@@ -27,6 +28,7 @@ impl super::asm::AsmBuilder<'_> {
 
         // === 【关键步骤 B】 计算最终栈大小 ===
         let ctx = self.ctx.as_ref().unwrap();
+        let callee_saved_regs = ctx.used_callee_saved_regs().to_vec();
 
         // 16 字节对齐
         let align_stack_size = ctx.total_frame_size;
@@ -45,6 +47,10 @@ impl super::asm::AsmBuilder<'_> {
             writeln!(final_output, "  addi  sp, sp, -{}", align_stack_size).unwrap();
             writeln!(final_output, "  sw    ra, {}(sp)", align_stack_size - 4).unwrap();
             writeln!(final_output, "  sw    s0, {}(sp)", align_stack_size - 8).unwrap();
+            for (idx, reg) in callee_saved_regs.iter().enumerate() {
+                let offset = align_stack_size - 12 - (idx as i32) * 4;
+                writeln!(final_output, "  sw    {}, {}(sp)", reg, offset).unwrap();
+            }
         } else {
             // --- 情况 B: 栈帧较大 (需要计算地址) ---
             // 1. 调整 SP
@@ -58,24 +64,42 @@ impl super::asm::AsmBuilder<'_> {
 
             writeln!(final_output, "  sw    ra, -4(t0)").unwrap();
             writeln!(final_output, "  sw    s0, -8(t0)").unwrap();
+            for (idx, reg) in callee_saved_regs.iter().enumerate() {
+                let offset = -12 - (idx as i32) * 4;
+                writeln!(final_output, "  sw    {}, {}(t0)", reg, offset).unwrap();
+            }
         }
 
         // === 【关键步骤 D】 组装 Epilogue (结语) ===
         // 构造恢复现场的指令序列
         let epilogue = if align_stack_size < 2048 {
-            format!(
-                "  lw    ra, {0}(sp)\n  lw    s0, {1}(sp)\n  addi  sp, sp, {2}\n  ret",
-                align_stack_size - 4,
-                align_stack_size - 8,
-                align_stack_size
-            )
+            let mut lines = Vec::new();
+            for (idx, reg) in callee_saved_regs.iter().enumerate() {
+                let offset = align_stack_size - 12 - (idx as i32) * 4;
+                lines.push(format!("  lw    {}, {}(sp)", reg, offset));
+            }
+            lines.push(format!("  lw    ra, {}(sp)", align_stack_size - 4));
+            lines.push(format!("  lw    s0, {}(sp)", align_stack_size - 8));
+            lines.push(format!("  addi  sp, sp, {}", align_stack_size));
+            lines.push("  ret".to_string());
+            lines.join("\n")
         } else {
             // 大栈帧恢复
             // 1. 恢复 ra, s0 (先算栈顶地址)
-            format!(
-                "  li    t0, {0}\n  add   t0, sp, t0\n  lw    ra, -4(t0)\n  lw    s0, -8(t0)\n  li    t0, {0}\n  add   sp, sp, t0\n  ret",
-                align_stack_size
-            )
+            let mut lines = vec![
+                format!("  li    t0, {}", align_stack_size),
+                "  add   t0, sp, t0".to_string(),
+            ];
+            for (idx, reg) in callee_saved_regs.iter().enumerate() {
+                let offset = -12 - (idx as i32) * 4;
+                lines.push(format!("  lw    {}, {}(t0)", reg, offset));
+            }
+            lines.push("  lw    ra, -4(t0)".to_string());
+            lines.push("  lw    s0, -8(t0)".to_string());
+            lines.push(format!("  li    t0, {}", align_stack_size));
+            lines.push("  add   sp, sp, t0".to_string());
+            lines.push("  ret".to_string());
+            lines.join("\n")
         };
 
         // 获取暂存的函数体汇编
@@ -119,6 +143,8 @@ impl super::asm::AsmBuilder<'_> {
     }
 
     pub fn generate_inst(&mut self, inst: Value, dfg: &DataFlowGraph) {
+        self.ctx.as_mut().unwrap().begin_inst(inst);
+
         // 使用 dfg.value(inst) 来获取指令的具体数据
         let value_data = dfg.value(inst);
 
@@ -252,7 +278,7 @@ impl super::asm::AsmBuilder<'_> {
                     format!("a{}", index)
                 } else {
                     // 情况 B: 栈传参 (index >= 8)
-                    
+
                     // 1. 获取偏移量
                     let frame_size = self.ctx.as_ref().unwrap().total_frame_size;
                     let offset = frame_size + (index as i32 - 8) * 4;
@@ -280,7 +306,8 @@ impl super::asm::AsmBuilder<'_> {
                         // 先用 t6 算出绝对地址，再 load
                         writeln!(self.output, "  li    t6, {}", offset).unwrap();
                         writeln!(self.output, "  add   t6, sp, t6").unwrap(); // t6 = addr
-                        writeln!(self.output, "  lw    {}, 0(t6)", reg_name).unwrap(); // reg = *t6
+                        writeln!(self.output, "  lw    {}, 0(t6)", reg_name).unwrap();
+                        // reg = *t6
                     }
 
                     // 4. 返回寄存器名

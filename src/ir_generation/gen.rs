@@ -1,9 +1,9 @@
-use crate::parser::ast::Type;
-use crate::parser::ast::*;
+use crate::analysis::scope::{Symbol, SymbolTable};
 use crate::ir_generation::decl::{build_param_type, process_global_decl};
 use crate::ir_generation::genfunc::FunctionGenerator;
-use crate::analysis::scope::{Symbol, SymbolTable};
-use koopa::ir::{builder_traits::*};
+use crate::parser::ast::Type;
+use crate::parser::ast::*;
+use koopa::ir::builder_traits::*;
 use koopa::ir::{FunctionData, Program, Type as IrType};
 
 pub trait GenerateProgram {
@@ -89,7 +89,7 @@ fn generate_single_function(func_def: &FuncDef, program: &mut Program, symbol_ta
         // [修改] 2. 在栈上分配空间
         // alloc_variable 内部会生成 alloc param_ty 指令，返回一个指向 param_ty 的指针 (即二级指针)
         let alloc_ptr = gen.alloc_variable(param_ty);
-        
+
         // 获取 alloc 指针的类型 (例如 **i32) 用于存入符号表
         let ptr_type = gen.func.dfg().value(alloc_ptr).ty().clone();
 

@@ -191,7 +191,7 @@ impl<'a> FunctionGenerator<'a> {
                 // 3. 检查是否需要数组退化
                 // 此时 ptr_ty 是我们一路手动推导出来的，绝对可靠
                 if let koopa::ir::TypeKind::Pointer(base) = ptr_ty.kind() {
-                    if matches!(base.kind() , TypeKind::Array(_,_ )) {
+                    if matches!(base.kind(), TypeKind::Array(_, _)) {
                         // 数组名作为右值 -> getelemptr ptr, 0 (获取首地址)
                         let zero = self.func.dfg_mut().new_value().integer(0);
                         let decay = self.func.dfg_mut().new_value().get_elem_ptr(ptr, zero);

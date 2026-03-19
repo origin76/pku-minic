@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
 
-use koopa::ir::FunctionData;
+use koopa::ir::{FunctionData, Value};
 
+use super::allocator::RegisterAllocation;
 use super::array::get_type_size;
 
 // 1. 定义寄存器分配/状态管理的上下文
@@ -18,6 +19,13 @@ pub struct RegInfo {
 pub struct FuncContext {
     pub name: String,
 
+    fixed_allocations: HashMap<Value, &'static str>,
+    fixed_value_state: HashMap<Value, bool>,
+    used_callee_saved_regs: Vec<&'static str>,
+    live_end: HashMap<Value, usize>,
+    inst_positions: HashMap<Value, usize>,
+    current_position: usize,
+
     pub phys_regs: Vec<&'static str>,
 
     // 记录每个物理寄存器的状态 (index 对应 phys_regs)
@@ -25,11 +33,11 @@ pub struct FuncContext {
 
     // 记录 Value 目前在哪个寄存器里 (用于快速查找)
     // Value -> PhysRegIndex
-    value_in_reg: HashMap<koopa::ir::Value, usize>,
+    value_in_reg: HashMap<Value, usize>,
 
     // 记录 Value 在栈上的偏移量 (sp + offset)
     // Value -> Offset
-    pub stack_slots: HashMap<koopa::ir::Value, i32>,
+    pub stack_slots: HashMap<Value, i32>,
 
     // 当前栈帧大小 (用于分配新的 slot)
     stack_size: i32,
@@ -48,12 +56,9 @@ pub struct FuncContext {
 }
 
 impl FuncContext {
-    pub fn new(name: String) -> Self {
-        // 定义可用的临时寄存器，根据 RISC-V 约定
-        // 优先使用 t0-t6, a0-a7
-        let regs = vec![
-            "t0", "t1", "t2", "t3", "t4", "t5", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
-        ];
+    pub fn new(name: String, allocation: RegisterAllocation) -> Self {
+        // 线性扫描优先固定分配 t0-t3，剩余寄存器作为动态/临时池。
+        let regs = vec!["t4", "t5", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
 
         let reg_count = regs.len();
 
@@ -65,6 +70,16 @@ impl FuncContext {
 
         Self {
             name,
+            fixed_allocations: allocation.fixed_registers,
+            fixed_value_state: HashMap::new(),
+            used_callee_saved_regs: allocation.used_callee_saved_regs,
+            live_end: allocation
+                .intervals
+                .iter()
+                .map(|(&value, interval)| (value, interval.end))
+                .collect(),
+            inst_positions: allocation.positions,
+            current_position: 0,
             phys_regs: regs,
             reg_status: vec![
                 RegInfo {
@@ -83,6 +98,17 @@ impl FuncContext {
         }
     }
 
+    pub fn used_callee_saved_regs(&self) -> &[&'static str] {
+        &self.used_callee_saved_regs
+    }
+
+    pub fn begin_inst(&mut self, inst: Value) {
+        if let Some(&position) = self.inst_positions.get(&inst) {
+            self.current_position = position;
+            self.expire_dead_values();
+        }
+    }
+
     // ==========================================
     // Public Interface: 获取/分配/锁定
     // ==========================================
@@ -90,11 +116,16 @@ impl FuncContext {
     /// 获取操作数 (Operand) 所在的寄存器
     /// 如果 Value 已经在寄存器中，直接返回
     /// 如果不在，分配一个寄存器（可能触发 Spill），并生成 lw 指令
-    pub fn get_reg_for_operand(
-        &mut self,
-        val: koopa::ir::Value,
-        output: &mut String,
-    ) -> &'static str {
+    pub fn get_reg_for_operand(&mut self, val: Value, output: &mut String) -> &'static str {
+        if let Some(reg_name) = self.fixed_allocations.get(&val).copied() {
+            if !self.fixed_value_state.contains_key(&val) {
+                let offset = self.get_or_alloc_stack_slot(val);
+                self.emit_load_from_stack(output, reg_name, offset);
+                self.fixed_value_state.insert(val, false);
+            }
+            return reg_name;
+        }
+
         // 1. 检查是否已经在寄存器中 (Hit)
         if let Some(&reg_idx) = self.value_in_reg.get(&val) {
             self.touch_lru(reg_idx); // 更新 LRU
@@ -133,11 +164,12 @@ impl FuncContext {
     /// 为结果 (Result) 分配一个新寄存器
     /// 这里的 Value 是还没有被计算出来的，所以不需要 Load
     /// 分配后会标记为 dirty，因为接下来马上要被写入
-    pub fn alloc_reg_for_result(
-        &mut self,
-        val: koopa::ir::Value,
-        output: &mut String,
-    ) -> &'static str {
+    pub fn alloc_reg_for_result(&mut self, val: Value, output: &mut String) -> &'static str {
+        if let Some(reg_name) = self.fixed_allocations.get(&val).copied() {
+            self.fixed_value_state.insert(val, true);
+            return reg_name;
+        }
+
         // 1. 找一个空闲寄存器或者 Spill
         let reg_idx = self.find_free_reg_or_spill(output);
 
@@ -183,45 +215,30 @@ impl FuncContext {
 
         // 2. 没有空闲，必须 Spill
         // 从 LRU 队列头部开始找，找到第一个【未被锁定】的寄存器
-        let mut victim_idx = 0;
-        let mut found = false;
-
-        // 我们需要遍历队列来找，而不是简单 pop_front，因为队头可能被 lock 了
-        for (i, &reg_idx) in self.lru_queue.iter().enumerate() {
-            if !self.locked_regs.contains(&reg_idx) {
-                victim_idx = reg_idx;
-                // 将其从队列中移除并放到队尾 (Touch)
-                self.lru_queue.remove(i);
-                self.lru_queue.push_back(victim_idx);
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
+        let Some((victim_idx, queue_pos)) = self.choose_spill_candidate() else {
             panic!("Register exhaustion: All registers are locked! (Instruction too complex?)");
-        }
+        };
+
+        self.lru_queue.remove(queue_pos);
+        self.lru_queue.push_back(victim_idx);
 
         // 3. 执行 Spill 操作
         let reg_name = self.phys_regs[victim_idx]; // &'static str 是 Copy 的，不会造成借用问题
 
-        let (victim_value, is_dirty) = {
+        let (victim_value, is_dirty, live_end) = {
             let info = &self.reg_status[victim_idx];
-            (info.value, info.dirty)
+            let live_end = info
+                .value
+                .and_then(|value| self.live_end.get(&value).copied())
+                .unwrap_or(usize::MAX);
+            (info.value, info.dirty, live_end)
         };
 
         if let Some(old_val) = victim_value {
             // 如果是脏的，必须写回栈
-            if is_dirty {
+            if is_dirty && live_end >= self.current_position {
                 let offset = self.get_or_alloc_stack_slot(old_val);
-                if offset >= -2048 && offset <= 2047 {
-                    writeln!(output, "  sw    {}, {}(sp)", reg_name, offset).unwrap();
-                } else {
-                    // 使用 t6
-                    writeln!(output, "  li    t6, {}", offset).unwrap();
-                    writeln!(output, "  add   t6, sp, t6").unwrap();
-                    writeln!(output, "  sw    {}, 0(t6)", reg_name).unwrap();
-                }
+                self.emit_store_to_stack(output, reg_name, offset);
             }
 
             // 解除旧 Value 到这个寄存器的映射
@@ -253,7 +270,7 @@ impl FuncContext {
     }
 
     /// 获取 Value 的栈偏移，如果没有则分配一个新的
-    fn get_or_alloc_stack_slot(&mut self, val: koopa::ir::Value) -> i32 {
+    fn get_or_alloc_stack_slot(&mut self, val: Value) -> i32 {
         if let Some(&offset) = self.stack_slots.get(&val) {
             return offset;
         }
@@ -270,28 +287,41 @@ impl FuncContext {
 
     /// 将所有当前占用的寄存器强制写回栈，并清空状态
     pub fn spill_all(&mut self, output: &mut String) {
+        let fixed_values: Vec<(Value, bool)> = self
+            .fixed_value_state
+            .iter()
+            .map(|(&value, &dirty)| (value, dirty))
+            .collect();
+        for (value, dirty) in fixed_values {
+            if dirty
+                && self.live_end.get(&value).copied().unwrap_or(usize::MAX) >= self.current_position
+            {
+                let reg_name = self.fixed_allocations[&value];
+                let offset = self.get_or_alloc_stack_slot(value);
+                self.emit_store_to_stack(output, reg_name, offset);
+            }
+        }
+        self.fixed_value_state.clear();
+
         for i in 0..self.reg_status.len() {
             // 我们不能直接在这里 borrow self.reg_status[i]，因为还要调用 methods
             // 所以先拷贝状态
-            let (val_opt, is_dirty) = {
+            let (val_opt, is_dirty, live_end) = {
                 let info = &self.reg_status[i];
-                (info.value, info.dirty)
+                let live_end = info
+                    .value
+                    .and_then(|value| self.live_end.get(&value).copied())
+                    .unwrap_or(usize::MAX);
+                (info.value, info.dirty, live_end)
             };
 
             if let Some(val) = val_opt {
                 let reg_name = self.phys_regs[i];
 
                 // 如果是脏的，写回栈
-                if is_dirty {
+                if is_dirty && live_end >= self.current_position {
                     let offset = self.get_or_alloc_stack_slot(val);
-                    if offset >= -2048 && offset <= 2047 {
-                        writeln!(output, "  sw    {}, {}(sp)", reg_name, offset).unwrap();
-                    } else {
-                        // 使用 t6 计算地址，绝对安全
-                        writeln!(output, "  li    t6, {}", offset).unwrap();
-                        writeln!(output, "  add   t6, sp, t6").unwrap();
-                        writeln!(output, "  sw    {}, 0(t6)", reg_name).unwrap();
-                    }
+                    self.emit_store_to_stack(output, reg_name, offset);
                 }
 
                 // 无论是否 dirty，都要移除映射
@@ -303,6 +333,120 @@ impl FuncContext {
             let info = &mut self.reg_status[i];
             info.value = None;
             info.dirty = false;
+        }
+    }
+
+    pub fn spill_caller_saved_for_call(&mut self, output: &mut String) {
+        let fixed_values: Vec<(Value, bool)> = self
+            .fixed_value_state
+            .iter()
+            .map(|(&value, &dirty)| (value, dirty))
+            .collect();
+
+        for (value, dirty) in fixed_values {
+            let reg_name = self.fixed_allocations[&value];
+            if is_callee_saved_reg(reg_name) {
+                continue;
+            }
+
+            if dirty
+                && self.live_end.get(&value).copied().unwrap_or(usize::MAX) >= self.current_position
+            {
+                let offset = self.get_or_alloc_stack_slot(value);
+                self.emit_store_to_stack(output, reg_name, offset);
+            }
+            self.fixed_value_state.remove(&value);
+        }
+
+        for i in 0..self.reg_status.len() {
+            let (val_opt, is_dirty, live_end) = {
+                let info = &self.reg_status[i];
+                let live_end = info
+                    .value
+                    .and_then(|value| self.live_end.get(&value).copied())
+                    .unwrap_or(usize::MAX);
+                (info.value, info.dirty, live_end)
+            };
+
+            if let Some(val) = val_opt {
+                let reg_name = self.phys_regs[i];
+                if is_dirty && live_end >= self.current_position {
+                    let offset = self.get_or_alloc_stack_slot(val);
+                    self.emit_store_to_stack(output, reg_name, offset);
+                }
+                self.value_in_reg.remove(&val);
+            }
+
+            let info = &mut self.reg_status[i];
+            info.value = None;
+            info.dirty = false;
+        }
+    }
+
+    fn expire_dead_values(&mut self) {
+        let dead_fixed: Vec<Value> = self
+            .fixed_value_state
+            .keys()
+            .copied()
+            .filter(|value| {
+                self.live_end.get(value).copied().unwrap_or(usize::MAX) < self.current_position
+            })
+            .collect();
+        for value in dead_fixed {
+            self.fixed_value_state.remove(&value);
+        }
+
+        let dead_dynamic: Vec<(usize, Value)> = self
+            .reg_status
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, info)| {
+                let value = info.value?;
+                let live_end = self.live_end.get(&value).copied().unwrap_or(usize::MAX);
+                (live_end < self.current_position).then_some((idx, value))
+            })
+            .collect();
+
+        for (idx, value) in dead_dynamic {
+            self.value_in_reg.remove(&value);
+            self.reg_status[idx].value = None;
+            self.reg_status[idx].dirty = false;
+        }
+    }
+
+    fn choose_spill_candidate(&self) -> Option<(usize, usize)> {
+        self.lru_queue
+            .iter()
+            .enumerate()
+            .filter_map(|(queue_pos, &reg_idx)| {
+                if self.locked_regs.contains(&reg_idx) {
+                    return None;
+                }
+                let value = self.reg_status[reg_idx].value?;
+                let live_end = self.live_end.get(&value).copied().unwrap_or(usize::MAX);
+                Some((reg_idx, queue_pos, live_end))
+            })
+            .max_by_key(|(_, _, live_end)| *live_end)
+            .map(|(reg_idx, queue_pos, _)| (reg_idx, queue_pos))
+    }
+
+    fn emit_load_from_stack(&self, output: &mut String, reg_name: &str, offset: i32) {
+        if offset >= -2048 && offset <= 2047 {
+            writeln!(output, "  lw    {}, {}(sp)", reg_name, offset).unwrap();
+        } else {
+            writeln!(output, "  li    t6, {}", offset).unwrap();
+            writeln!(output, "  add   t6, sp, t6").unwrap();
+            writeln!(output, "  lw    {}, 0(t6)", reg_name).unwrap();
+        }
+    }
+
+    fn emit_store_to_stack(&self, output: &mut String, reg_name: &str, offset: i32) {
+        if offset >= -2048 && offset <= 2047 {
+            writeln!(output, "  sw    {}, {}(sp)", reg_name, offset).unwrap();
+        } else {
+            writeln!(output, "  li    t6, {}", offset).unwrap();
+            writeln!(output, "  add   t6, sp, t6").unwrap();
+            writeln!(output, "  sw    {}, 0(t6)", reg_name).unwrap();
         }
     }
 
@@ -395,8 +539,13 @@ impl FuncContext {
 
         self.stack_size = current_offset;
 
-        // 3. 计算最终大小 (RA + S0)
-        let total = self.stack_size + 8;
+        // 3. 计算最终大小 (RA + S0 + 实际使用的 callee-saved 寄存器)
+        let saved_regs_size = (2 + self.used_callee_saved_regs.len() as i32) * 4;
+        let total = self.stack_size + saved_regs_size;
         self.total_frame_size = (total + 15) & !15;
     }
+}
+
+fn is_callee_saved_reg(reg: &str) -> bool {
+    matches!(reg, "s1" | "s2" | "s3" | "s4")
 }

@@ -1,11 +1,12 @@
-use koopa::ir::{BinaryOp, builder::{LocalInstBuilder, ValueBuilder}};
+use koopa::ir::{
+    builder::{LocalInstBuilder, ValueBuilder},
+    BinaryOp,
+};
 
 use crate::{
     analysis::scope::{Symbol, SymbolTable},
     ir_generation::{
-        decl::build_array_type,
-        flatten::flatten_const_init_val,
-        genfunc::FunctionGenerator,
+        decl::build_array_type, flatten::flatten_const_init_val, genfunc::FunctionGenerator,
     },
     parser::ast::*,
 };
@@ -24,13 +25,13 @@ impl<'a> FunctionGenerator<'a> {
             let dims: Vec<usize> = def
                 .dims
                 .iter()
-                .map(|d| evaluate_const_exp(&self.symbol_table,d) as usize)
+                .map(|d| evaluate_const_exp(&self.symbol_table, d) as usize)
                 .collect();
 
             if dims.is_empty() {
                 // === 情况 A: 标量常量 ===
                 if let ConstInitVal::Exp(init_exp) = &def.init {
-                    let val = evaluate_const_exp(&self.symbol_table,init_exp);
+                    let val = evaluate_const_exp(&self.symbol_table, init_exp);
                     // 仅存入符号表，供常量折叠使用
                     self.symbol_table.insert_const(def.ident.clone(), val);
                 }
@@ -59,7 +60,8 @@ impl<'a> FunctionGenerator<'a> {
 
                 // 注册 alloc 指针，以便 generate_lval_address 能找到它
                 let ptr_type = self.func.dfg().value(alloc_ptr).ty().clone();
-                self.symbol_table.insert_var(def.ident.clone(), alloc_ptr , ptr_type);
+                self.symbol_table
+                    .insert_var(def.ident.clone(), alloc_ptr, ptr_type);
 
                 // 生成 Store 指令初始化栈上内存
                 for (i, &val) in values.iter().enumerate() {

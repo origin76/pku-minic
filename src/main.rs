@@ -1,18 +1,14 @@
+use lalrpop_util::lalrpop_mod;
 use std::env::args;
 use std::fs::{read_to_string, File};
 use std::io::Result;
 use std::io::Write;
-use lalrpop_util::lalrpop_mod;
 
-use complier_dev::{
-    code_generation::asm::AsmBuilder,
-    ir_generation::gen::GenerateProgram,
-    parser,
-};
-use koopa::ir::Program;
+use complier_dev::{code_generation::asm::AsmBuilder, ir_generation::gen::GenerateProgram, parser};
 use koopa::back::KoopaGenerator;
+use koopa::ir::Program;
 
-lalrpop_mod!(sysy,"/parser/sysy.rs");
+lalrpop_mod!(sysy, "/parser/sysy.rs");
 
 fn main() -> Result<()> {
     // Parse command line arguments

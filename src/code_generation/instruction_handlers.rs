@@ -213,17 +213,21 @@ impl super::asm::AsmBuilder<'_> {
     pub fn process_alloc(&mut self, _result_val: Value, _alloc: &Alloc, _dfg: &DataFlowGraph) {
         {}
     }
-    
+
     pub fn process_load(&mut self, result_val: Value, load: &Load, dfg: &DataFlowGraph) {
         let src_ptr = load.src();
-        
+
         // 1. 分配目标寄存器
-        let dest_reg = self.ctx.as_mut().unwrap().alloc_reg_for_result(result_val, &mut self.output);
+        let dest_reg = self
+            .ctx
+            .as_mut()
+            .unwrap()
+            .alloc_reg_for_result(result_val, &mut self.output);
 
         // ================================================================
         // 【关键修复】区分 "读取局部变量" 和 "读取指针指向的内存"
         // ================================================================
-        
+
         // 判断源是否是局部 Alloc 指令
         let is_local_alloc = if src_ptr.is_global() {
             false
@@ -233,20 +237,30 @@ impl super::asm::AsmBuilder<'_> {
 
         // 2. 检查是否可以直接从栈槽加载 (Case A)
         if is_local_alloc {
-            let offset_opt = self.ctx.as_ref().unwrap().stack_slots.get(&src_ptr).copied();
-            
+            let offset_opt = self
+                .ctx
+                .as_ref()
+                .unwrap()
+                .stack_slots
+                .get(&src_ptr)
+                .copied();
+
             if let Some(offset) = offset_opt {
                 // === 情况 A: 从局部变量加载 (Alloc) ===
                 // 语义：读取变量的值
                 if offset >= -2048 && offset <= 2047 {
                     writeln!(self.output, "  lw    {}, {}(sp)", dest_reg, offset).unwrap();
                 } else {
-                    let tmp = self.ctx.as_mut().unwrap().get_temp_reg_for_address_calc(&mut self.output);
+                    let tmp = self
+                        .ctx
+                        .as_mut()
+                        .unwrap()
+                        .get_temp_reg_for_address_calc(&mut self.output);
                     writeln!(self.output, "  li    {}, {}", tmp, offset).unwrap();
                     writeln!(self.output, "  add   {}, sp, {}", tmp, tmp).unwrap();
                     writeln!(self.output, "  lw    {}, 0({})", dest_reg, tmp).unwrap();
                 }
-                
+
                 self.ctx.as_mut().unwrap().unlock_all();
                 return;
             }
@@ -254,9 +268,9 @@ impl super::asm::AsmBuilder<'_> {
 
         // === 情况 B: 从指针加载 (GetElemPtr, Global, Param...) ===
         // 语义：先获取指针的值(地址)，然后解引用该地址
-        
+
         let ptr_reg = self.resolve_operand(src_ptr, dfg);
-        
+
         // 生成: lw dest, 0(ptr)
         writeln!(self.output, "  lw    {}, 0({})", dest_reg, ptr_reg).unwrap();
 
@@ -275,11 +289,11 @@ impl super::asm::AsmBuilder<'_> {
         // ================================================================
         // 【关键修复】安全检查 dest 类型
         // ================================================================
-        
+
         // 判断是否是局部 Alloc 指令
         let is_local_alloc = if dest.is_global() {
             // 全局变量不算局部 Alloc，它应该走下面的 resolve_operand -> la 逻辑
-            false 
+            false
         } else {
             // 只有非全局的，才去 DFG 里查
             matches!(dfg.value(dest).kind(), koopa::ir::ValueKind::Alloc(_))
@@ -288,7 +302,7 @@ impl super::asm::AsmBuilder<'_> {
         // 2. 尝试直接写栈 (Case A)
         if is_local_alloc {
             let offset_opt = self.ctx.as_ref().unwrap().stack_slots.get(&dest).copied();
-            
+
             if let Some(offset) = offset_opt {
                 // === 情况 A: 存入局部变量 (Alloc) ===
                 if offset >= -2048 && offset <= 2047 {
@@ -303,9 +317,9 @@ impl super::asm::AsmBuilder<'_> {
                     writeln!(self.output, "  add   {}, {}, sp", tmp_reg, tmp_reg).unwrap();
                     writeln!(self.output, "  sw    {}, 0({})", val_reg_str, tmp_reg).unwrap();
                 }
-                
+
                 self.ctx.as_mut().unwrap().unlock_all();
-                return; 
+                return;
             }
         }
 
@@ -343,9 +357,12 @@ impl super::asm::AsmBuilder<'_> {
         writeln!(self.output, "  j     {}", asm_label).unwrap();
     }
 
-   pub fn process_call(&mut self, inst_val: Value, call: &Call, dfg: &DataFlowGraph) {
+    pub fn process_call(&mut self, inst_val: Value, call: &Call, dfg: &DataFlowGraph) {
         // 1. 保护现场
-        self.ctx.as_mut().unwrap().spill_all(&mut self.output);
+        self.ctx
+            .as_mut()
+            .unwrap()
+            .spill_caller_saved_for_call(&mut self.output);
 
         let args = call.args();
 
@@ -357,14 +374,14 @@ impl super::asm::AsmBuilder<'_> {
             // - 局部数组(Alloc) -> addi sp (这正是你缺失的逻辑！)
             // - 全局变量 -> la
             let val_reg = self.resolve_operand(arg, dfg);
-            
+
             if i < 8 {
                 // === 寄存器传参 (a0 - a7) ===
                 let target_reg = format!("a{}", i);
                 if val_reg != target_reg {
                     writeln!(self.output, "  mv    {}, {}", target_reg, val_reg).unwrap();
                 }
-                
+
                 // 【关键】锁定已填充的参数寄存器！
                 // 防止处理下一个参数时，resolve_operand 挑选了 target_reg 作为临时寄存器
                 self.ctx.as_mut().unwrap().lock_reg(&target_reg);
@@ -372,12 +389,16 @@ impl super::asm::AsmBuilder<'_> {
                 // === 栈传参 (Arg 9+) ===
                 // 存入 Outgoing Args 区域 (位于当前 SP 的最底部)
                 let offset = (i as i32 - 8) * 4;
-                
+
                 // 检查立即数范围
                 if offset >= -2048 && offset <= 2047 {
                     writeln!(self.output, "  sw    {}, {}(sp)", val_reg, offset).unwrap();
                 } else {
-                    let tmp = self.ctx.as_mut().unwrap().get_temp_reg_for_address_calc(&mut self.output);
+                    let tmp = self
+                        .ctx
+                        .as_mut()
+                        .unwrap()
+                        .get_temp_reg_for_address_calc(&mut self.output);
                     writeln!(self.output, "  li    {}, {}", tmp, offset).unwrap();
                     writeln!(self.output, "  add   {}, sp, {}", tmp, tmp).unwrap();
                     writeln!(self.output, "  sw    {}, 0({})", val_reg, tmp).unwrap();

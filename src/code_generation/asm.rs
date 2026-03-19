@@ -1,8 +1,6 @@
-use super::reg_context::FuncContext;
 use super::array::get_type_size;
-use koopa::ir::{
-    Program, Type, Value, ValueKind, dfg::DataFlowGraph
-};
+use super::reg_context::FuncContext;
+use koopa::ir::{dfg::DataFlowGraph, Program, Type, Value, ValueKind};
 use std::fmt::Write;
 
 // 2. 定义代码生成器主结构体
@@ -48,7 +46,7 @@ impl<'a> AsmBuilder<'a> {
 
     fn generate_global_value(&mut self, program: &Program, value: Value) {
         let data = program.borrow_value(value);
-        
+
         match data.kind() {
             // 标量数值
             ValueKind::Integer(int) => {
@@ -83,7 +81,7 @@ impl<'a> AsmBuilder<'a> {
                     let _ = writeln!(self.output, "  .bss");
                     let _ = writeln!(self.output, "  .globl {}", name);
                     let _ = writeln!(self.output, "{}:", name);
-                    
+
                     // 【修复】不能写死 4，必须根据类型计算大小
                     // 例如 [i32, 10] 需要 .zero 40
                     let size = get_type_size(&init_data.ty());
@@ -96,10 +94,10 @@ impl<'a> AsmBuilder<'a> {
                     let _ = writeln!(self.output, "  .data");
                     let _ = writeln!(self.output, "  .globl {}", name);
                     let _ = writeln!(self.output, "{}:", name);
-                    
+
                     // 调用递归辅助函数生成 .word 序列
                     self.generate_global_value(program, init_val);
-                    
+
                     let _ = writeln!(self.output, "");
                 }
 

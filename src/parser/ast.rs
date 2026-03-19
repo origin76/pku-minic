@@ -11,7 +11,7 @@ pub struct CompUnit {
     pub items: Vec<GlobalItem>,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct FuncDef {
     pub func_type: Type,
     pub ident: String,
@@ -22,11 +22,10 @@ pub struct FuncDef {
 pub struct FuncFParam {
     pub b_type: Type, // 目前只有 int
     pub ident: String,
-    pub dims: Vec<Box<Exp>>
-    // 未来可能还有数组维度
+    pub dims: Vec<Box<Exp>>, // 未来可能还有数组维度
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum Type {
     Int,
     Void,
@@ -61,7 +60,7 @@ pub struct VarDef {
     // 变量初始化是可选的 (int a;)
     // 并且初始化值是在运行时计算的 (int a = b + 1;)，所以是 Exp
     pub dims: Vec<Box<Exp>>,
-    pub init: Option<InitVal>, 
+    pub init: Option<InitVal>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +81,7 @@ pub struct ConstDef {
     // 文法中 ConstInitVal ::= ConstExp，而 ConstExp 就是 Exp
     // 所以这里直接存 Exp 即可
     pub dims: Vec<Box<Exp>>,
-    pub init: ConstInitVal, 
+    pub init: ConstInitVal,
 }
 
 #[derive(Debug, Clone)]
@@ -100,24 +99,24 @@ pub enum Stmt {
     Exp(Option<Box<Exp>>),
     Block(Block),
     If(Box<Exp>, Box<Stmt>, Option<Box<Stmt>>),
-    While(Box<Exp>, Box<Stmt>), 
+    While(Box<Exp>, Box<Stmt>),
     Break,
     Continue,
 }
 
 // ast.rs
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum Exp {
     // 二元运算
     BinaryExp(Box<Exp>, BinaryOp, Box<Exp>),
     // 一元运算 (直接在 Exp 层递归)
     UnaryExp(UnaryOp, Box<Exp>),
     // 基础表达式 (用于通过 Number 终止递归)
-    PrimaryExp(Box<PrimaryExp>), 
-    FuncCall(String, Vec<Box<Exp>>), 
+    PrimaryExp(Box<PrimaryExp>),
+    FuncCall(String, Vec<Box<Exp>>),
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum PrimaryExp {
     Parentheses(Box<Exp>),
     Number(i32),
@@ -130,7 +129,7 @@ pub struct LVal {
     pub indices: Vec<Box<Exp>>,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum UnaryOp {
     Plus,
     Minus,

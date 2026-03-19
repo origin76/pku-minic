@@ -3,9 +3,7 @@ use koopa::ir::{builder::*, Type, TypeKind, Value};
 use crate::{
     analysis::scope::Symbol,
     ir_generation::{
-        constval::evaluate_const_exp,
-        decl::build_array_type,
-        flatten::flatten_init_val,
+        constval::evaluate_const_exp, decl::build_array_type, flatten::flatten_init_val,
         genfunc::FunctionGenerator,
     },
     parser::ast::{Exp, InitVal, LVal, VarDecl},
